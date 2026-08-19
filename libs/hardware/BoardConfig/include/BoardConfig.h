@@ -258,7 +258,7 @@
 #ifndef FREEINK_CAP_RTC
 #define FREEINK_CAP_RTC \
   (FREEINK_DEVICE_X3 || FREEINK_DEVICE_STICKY || FREEINK_DEVICE_X4PRO || FREEINK_DEVICE_PAPERMONO || \
-   FREEINK_DEVICE_PAPERS3)
+   FREEINK_DEVICE_PAPERS3 || FREEINK_DEVICE_LILYGO)
 #endif
 #ifndef FREEINK_CAP_TEMP_HUMIDITY
 #define FREEINK_CAP_TEMP_HUMIDITY (FREEINK_DEVICE_STICKY)
@@ -1140,7 +1140,9 @@ constexpr BoardProfile LILYGO_T5S3 = {
     NO_SDMMC,
     {39, 40, 400000, 0x55, 0x6B},  // BQ27220 gauge (0x55) + BQ25896 charger (0x6B) on SDA39/SCL40
     NO_MIC,
-    NO_SENSORS,
+    {39, 40, 400000, 0x51, 0, 0, 0, RtcType::Pcf8563,
+     ImuType::None},  // PCF8563 RTC (0x51) on the shared SDA39/SCL40 bus (user-confirmed silicon;
+                      // the board-support pin header's PCF85063 name is a misnomer)
     1.2f,  // uiScale: 4.7" 960x540 touch (~234 PPI) — finger-sized chrome, like Sticky
     // Power latch: main-power MOSFET on GPIO2, driven HIGH first thing in boot
     // via holdPowerRails() or the board powers off when USB is unplugged.
