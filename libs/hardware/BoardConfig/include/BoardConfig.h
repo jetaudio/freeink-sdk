@@ -694,8 +694,9 @@ constexpr TouchConfig NO_TOUCH = {TouchController::None,
 // portrait 540x960 frame on the landscape 960x540 panel, so swap axes into the
 // panel-native display frame before app-level orientation mapping.
 constexpr TouchConfig LILYGO_T5_PRO_GT911 = {
-    TouchController::Gt911, 39,   40,    3,   9, 0x5D, 0, 959, 0, 539, false, 0x14, false, true,
-    PIN_UNASSIGNED,         true, false, true};  // powerEnable, swapXY=true, flipX=false, flipY=true
+    TouchController::Gt911, 39,   40,    3,   9,     0x5D, 0, 959, 0, 539, false, 0x14, false, true,
+    PIN_UNASSIGNED,         true, false, true, true};  // powerEnable, swapXY=true, flipX=false, flipY=true,
+                                                       // hasHomeKey: capacitive front key on the GT911 (status 0x10)
 constexpr FrontlightConfig NO_FRONTLIGHT = {PIN_UNASSIGNED, 0, 0, true};
 constexpr AudioConfig NO_AUDIO = {AudioOutput::None,
                                   PIN_UNASSIGNED,
@@ -1123,7 +1124,10 @@ constexpr BoardProfile LILYGO_T5S3 = {
     0,                                           // displaySpiHz n/a (external bus)
     {14, 21, 13, 12, PIN_UNASSIGNED, false, 0},  // SD over SPI: SCLK14 MISO21 MOSI13 CS12
     {PIN_UNASSIGNED, PIN_UNASSIGNED, PIN_UNASSIGNED, PIN_UNASSIGNED, PIN_UNASSIGNED, PIN_UNASSIGNED, 0,
-     false},         // power=BOOT (GPIO0), active-low
+     false},  // power=BOOT (GPIO0), active-low. Do NOT map IO48 as confirm: on the
+              // Pro Lite it reads spurious active-low pulses (phantom Confirm
+              // presses opened the reader menu by itself) — verify its wiring
+              // on real hardware before mapping it again.
     PIN_UNASSIGNED,  // batteryAdc: none — uses the I2C fuel gauge below
     PIN_UNASSIGNED,
     2.0f,
