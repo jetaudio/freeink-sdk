@@ -1162,9 +1162,21 @@ constexpr BoardProfile LILYGO_T5S3 = {
      ImuType::None},  // PCF8563 RTC (0x51) on the shared SDA39/SCL40 bus (user-confirmed silicon;
                       // the board-support pin header's PCF85063 name is a misnomer)
     1.2f,  // uiScale: 4.7" 960x540 touch (~234 PPI) — finger-sized chrome, like Sticky
-    // Power latch: main-power MOSFET on GPIO2, driven HIGH first thing in boot
-    // via holdPowerRails() or the board powers off when USB is unplugged.
-    {2}};
+    // NO power latch. This profile used to carry latch0 = GPIO2 with an M5Paper-style
+    // "main-power MOSFET, hold HIGH or the board dies on USB unplug" comment. GPIO2 is
+    // nothing of the sort here: the T5 E-paper S3 Pro schematic (LILYGO publishes none
+    // for the Lite; the vendor states the variants share the core design) maps ESP32
+    // IO2 to RTC_INT — the PCF8563's open-drain alarm output, pulled up through 10K —
+    // and shows no soft power latch anywhere. Power sequencing is the BQ25896's job,
+    // with its /QON pin on the S4 button straight to ground, no GPIO involved.
+    //
+    // holdPowerRails() drives latch pins as OUTPUT HIGH first thing in setup(), so the
+    // stale entry had the firmware fighting the RTC's open-drain output every time an
+    // alarm asserted. Nothing had noticed because no alarm was armed yet — but the RTC
+    // is wired up now, so alarms and interrupts would simply never have been seen.
+    // (latchConflictsWithBus() cannot catch this: it guards display and SD bus pins,
+    // and SensorsConfig carries no RTC interrupt pin for it to compare against.)
+    {}};  // power: none
 
 // --- M5Paper v1.1 4.7" (ED047TC1 behind an IT8951E controller) — ESP32 --------
 // 540x960 16-gray panel driven through an IT8951E timing controller over SPI
