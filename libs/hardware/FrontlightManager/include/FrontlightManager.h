@@ -33,6 +33,18 @@ class FrontlightManager {
   void off();
   void on();
 
+  // Park the light for deep sleep: stop the PWM, then drive and LATCH the output
+  // pin(s) at the LED's inactive level (gpio_hold_en, so the level survives the
+  // sleep). Call it on the way into deep sleep, before the rails go down.
+  //
+  // Not the same as off(): off() writes a zero duty, but the pad is still owned
+  // by LEDC and sleep entry hands it to esp_sleep_config_gpio_isolate(), which
+  // floats it — what the light does then is down to an external pull, a
+  // board-layout detail. A frontlight left lit is the single largest load a
+  // sleeping reader can carry, so it is driven off rather than assumed off.
+  // begin() releases the hold on the next boot.
+  void prepareForDeepSleep();
+
   // Warm/cool mix, 0 = fully cool, 100 = fully warm, 50 = neutral. Only meaningful on a
   // two-channel board (hasColorTemperature()); a no-op on single-channel frontlights.
   void setColorTemperature(uint8_t warmPercent);
