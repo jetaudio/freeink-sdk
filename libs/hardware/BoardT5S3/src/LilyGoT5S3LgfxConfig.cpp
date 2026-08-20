@@ -45,20 +45,26 @@ bool readTpsRegister(uint8_t reg, uint8_t* data, size_t len) {
   return true;
 }
 
-// Ambient temperature in degrees C from the PMIC's thermistor. Trigger a
-// conversion, poll TMST1 until it reports one finished, then read the value.
+// Ambient temperature in degrees C from the PMIC's thermistor.
+//
+// Wait for READ_THERM to self-clear, not for CONV_END. CONV_END latches and is
+// still set from whatever conversion ran before, so a loop that breaks on it
+// alone returns on the very first poll and reads TMST_VALUE before this
+// conversion has produced anything -- which is how this came back a flat 0 C and
+// pinned the waveform to its coldest, longest range no matter how warm the panel
+// actually was.
 bool readTpsThermistor(int8_t* out) {
   if (!writeTpsRegister8(kTpsRegTmst1, kTpsStartConversion)) return false;
   for (int tries = 0; tries < 100; ++tries) {
+    delay(2);
     uint8_t status = 0;
     if (!readTpsRegister(kTpsRegTmst1, &status, 1)) return false;
-    if (status & kTpsConversionDone) {
+    if ((status & kTpsStartConversion) == 0 && (status & kTpsConversionDone) != 0) {
       uint8_t value = 0;
       if (!readTpsRegister(kTpsRegTmstValue, &value, 1)) return false;
       *out = static_cast<int8_t>(value);
       return true;
     }
-    delay(1);
   }
   return false;
 }
@@ -70,7 +76,7 @@ bool readTpsThermistor(int8_t* out) {
 bool readPanelTemperature(int8_t* out) {
   if (!BoardT5S3::setPca9535PinMode(PCA9535_IO15_TPS_WAKEUP, OUTPUT)) return false;
   if (!BoardT5S3::writePca9535Pin(PCA9535_IO15_TPS_WAKEUP, true)) return false;
-  delay(5);  // PMIC wakeup
+  delay(10);  // PMIC wakeup, then its thermistor block settles
   const bool ok = readTpsThermistor(out);
   BoardT5S3::writePca9535Pin(PCA9535_IO15_TPS_WAKEUP, false);
   return ok;
@@ -165,10 +171,20 @@ bool epdPowerOn() {
 
 freeink::LgfxEpdConfig buildConfig() {
   int8_t measured = 0;
-  const int tempC = readPanelTemperature(&measured) ? measured : kAssumedTemperatureC;
+  const bool measuredOk = readPanelTemperature(&measured);
+  const int tempC = measuredOk ? measured : kAssumedTemperatureC;
   const size_t range = freeink::ed047tc2::tempRangeIndex(tempC);
   const uint32_t* lut = freeink::ed047tc2::kDuLut[range];
   const size_t step = freeink::ed047tc2::kDuLutStep[range];
+
+  // Worth a line on the console: the drive length is the single number that
+  // decides how the panel looks, it is chosen once and never revisited, and a
+  // thermistor that reads high silently under-drives every transition. Without
+  // this there is no way to tell a waveform problem from a wrong temperature.
+  Serial.printf("[epd] panel %d C%s -> waveform range %u (%u..%u C), %u drive frames\n", tempC,
+                measuredOk ? "" : " (assumed, thermistor read failed)", static_cast<unsigned>(range),
+                freeink::ed047tc2::kTempRanges[range].minC, freeink::ed047tc2::kTempRanges[range].maxC,
+                freeink::ed047tc2::kDriveFrames[range]);
 
   // Every epd_mode gets the same panel waveform. CrossPoint only ever puts two
   // levels on this panel — LovyanGFX binarises and dithers the canvas on the
