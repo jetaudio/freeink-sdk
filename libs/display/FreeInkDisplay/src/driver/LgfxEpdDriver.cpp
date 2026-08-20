@@ -107,7 +107,11 @@ class FreeInkLgfxEpd : public lgfx::LGFX_Device {
 
 FreeInkLgfxEpd g_dev;
 
-lgfx::epd_mode::epd_mode_t epdModeFor(RefreshMode m) {
+lgfx::epd_mode::epd_mode_t epdModeFor(RefreshMode m, bool twoLevelWaveform) {
+  // A board that supplies one two-level panel waveform has nothing to switch to:
+  // every mode holds the same LUT, and changing epd_mode would defeat the diff
+  // (see LgfxEpdConfig::twoLevelWaveform). Clean refreshes flash instead.
+  if (twoLevelWaveform) return lgfx::epd_mode::epd_fast;
   switch (m) {
     case RefreshMode::Full: return lgfx::epd_mode::epd_text;
     case RefreshMode::Half: return lgfx::epd_mode::epd_text;
@@ -192,6 +196,24 @@ void pushCanvas(lgfx::epd_mode::epd_mode_t epdMode) {
   g_dev.waitDisplay();
 }
 
+// Ghost-clearing pass for a clean refresh on a two-level waveform: drive the
+// whole screen to black and let the caller's frame drive it back, so every pixel
+// that ends up white takes a full black->white transition. That is what breaks up
+// the residue a run of differential updates leaves behind.
+//
+// It also keeps the panel's charge balanced, which a from-independent clean LUT
+// cannot. A transition costs the panel L frames of drive in one direction; a
+// pixel that was white and stays white takes -L here and +L from the frame push,
+// netting zero, and a pixel that was already black is skipped by Panel_EPD's diff
+// and takes no drive at all.
+void flashCanvas() {
+  if (!g_canvas) return;
+  auto* dst = static_cast<uint8_t*>(g_canvas->getBuffer());
+  if (!dst) return;
+  memset(dst, kGrayBlack, static_cast<size_t>(g_w) * g_h);
+  pushCanvas(lgfx::epd_mode::epd_fast);
+}
+
 }  // namespace
 #endif  // FREEINK_DRIVER_LGFX_EPD
 
@@ -220,8 +242,11 @@ void LgfxEpdDriver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev,
   (void)bus;
   (void)prev;
 #if FREEINK_DRIVER_LGFX_EPD
+  // A clean refresh on a two-level waveform flashes to black first; the frame
+  // push below then drives every white pixel back through a full transition.
+  if (_cfg.twoLevelWaveform && mode != RefreshMode::Fast) flashCanvas();
   fillCanvasBW(fb);          // expand the 1-bpp frame into the gray canvas
-  pushCanvas(epdModeFor(mode));
+  pushCanvas(epdModeFor(mode, _cfg.twoLevelWaveform));
   if (turnOff) g_dev.sleep();
 #else
   (void)fb;

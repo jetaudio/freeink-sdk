@@ -1,42 +1,24 @@
 #include <BoardT5S3.h>
+#include <ED047TC2Waveform.h>
 #include <LgfxEpdConfig.h>
 #include <Wire.h>
 
 namespace {
 
 constexpr int kDefaultVcomMv = -1600;
+constexpr uint8_t kTpsRegTmstValue = 0x00;
 constexpr uint8_t kTpsRegEnable = 0x01;
 constexpr uint8_t kTpsRegVcom = 0x03;
+constexpr uint8_t kTpsRegTmst1 = 0x0D;
 constexpr uint8_t kTpsRegPowerGood = 0x0F;
 constexpr uint8_t kTpsEnableOutputs = 0x3F;
+constexpr uint8_t kTpsStartConversion = 0x80;  // TMST1 READ_THERM
+constexpr uint8_t kTpsConversionDone = 0x20;   // TMST1 CONV_END
 
-#define LUT_MAKE(d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, da, db, dc, dd, de, df) \
-  (uint32_t)((d0 << 0) | (d1 << 2) | (d2 << 4) | (d3 << 6) | (d4 << 8) | (d5 << 10) | (d6 << 12) | \
-             (d7 << 14) | (d8 << 16) | (d9 << 18) | (da << 20) | (db << 22) | (dc << 24) | \
-             (dd << 26) | (de << 28) | (df << 30))
-
-// Single waveform for BOTH the B/W base push and the AA gray overlay push.
-// Panel_EPD's per-pixel diff embeds the epd_mode LUT offset in the stored
-// value, so alternating modes between the two pushes of a page turn defeats
-// the diff and re-drives the whole screen — the LovyanGFX default lut_fast
-// then flashes every white pixel black for two frames (the full-screen black
-// "swipe"). Using one LUT under one mode keeps unchanged pixels skipped.
-// Columns 0/15 carry the default lut_fast drive (changed B/W text pixels);
-// columns 1-6 / 9-14 carry the AA nudge for the gray levels AA produces.
-constexpr uint32_t kFastLut[] = {
-    LUT_MAKE(2, 1, 1, 1, 1, 1, 1, 3, 3, 2, 2, 2, 2, 2, 2, 1),
-    LUT_MAKE(2, 3, 1, 1, 1, 1, 3, 3, 3, 3, 2, 2, 2, 2, 3, 1),
-    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
-    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
-    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
-    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
-    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
-    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),
-    ~0u,
-    0u,
-};
-
-#undef LUT_MAKE
+// Used when the PMIC thermistor cannot be read. Room temperature sits in the
+// middle of the waveform's range, so a wrong guess is off by at most a few
+// frames either way.
+constexpr int kAssumedTemperatureC = 25;
 
 bool writeTpsRegister(uint8_t reg, const uint8_t* data, size_t len) {
   BoardT5S3::ScopedI2CLock lock;
@@ -61,6 +43,37 @@ bool readTpsRegister(uint8_t reg, uint8_t* data, size_t len) {
   }
   for (size_t i = 0; i < len; ++i) data[i] = Wire.read();
   return true;
+}
+
+// Ambient temperature in degrees C from the PMIC's thermistor. Trigger a
+// conversion, poll TMST1 until it reports one finished, then read the value.
+bool readTpsThermistor(int8_t* out) {
+  if (!writeTpsRegister8(kTpsRegTmst1, kTpsStartConversion)) return false;
+  for (int tries = 0; tries < 100; ++tries) {
+    uint8_t status = 0;
+    if (!readTpsRegister(kTpsRegTmst1, &status, 1)) return false;
+    if (status & kTpsConversionDone) {
+      uint8_t value = 0;
+      if (!readTpsRegister(kTpsRegTmstValue, &value, 1)) return false;
+      *out = static_cast<int8_t>(value);
+      return true;
+    }
+    delay(1);
+  }
+  return false;
+}
+
+// The PMIC answers I2C as soon as WAKEUP is high, well before the high-voltage
+// rails come up, so the panel temperature can be sampled without driving the
+// panel at all. That matters because this runs before the EPD bus exists: the
+// waveform has to be chosen before LovyanGFX expands it at panel init.
+bool readPanelTemperature(int8_t* out) {
+  if (!BoardT5S3::setPca9535PinMode(PCA9535_IO15_TPS_WAKEUP, OUTPUT)) return false;
+  if (!BoardT5S3::writePca9535Pin(PCA9535_IO15_TPS_WAKEUP, true)) return false;
+  delay(5);  // PMIC wakeup
+  const bool ok = readTpsThermistor(out);
+  BoardT5S3::writePca9535Pin(PCA9535_IO15_TPS_WAKEUP, false);
+  return ok;
 }
 
 bool waitForPcaPinHigh(uint8_t pin, uint32_t timeoutMs) {
@@ -150,12 +163,20 @@ bool epdPowerOn() {
   return true;
 }
 
-}  // namespace
+freeink::LgfxEpdConfig buildConfig() {
+  int8_t measured = 0;
+  const int tempC = readPanelTemperature(&measured) ? measured : kAssumedTemperatureC;
+  const size_t range = freeink::ed047tc2::tempRangeIndex(tempC);
+  const uint32_t* lut = freeink::ed047tc2::kDuLut[range];
+  const size_t step = freeink::ed047tc2::kDuLutStep[range];
 
-namespace freeink {
-
-const LgfxEpdConfig& lilygoT5S3LgfxConfig() {
-  static const LgfxEpdConfig cfg = {
+  // Every epd_mode gets the same panel waveform. CrossPoint only ever puts two
+  // levels on this panel — LovyanGFX binarises and dithers the canvas on the
+  // fast path — so the vendor's DU waveform covers every transition it can ask
+  // for. The driver only ever selects epd_fast here (twoLevelWaveform), but
+  // filling all four slots keeps LovyanGFX's generic LUTs, which are tuned for a
+  // different panel, out of the build and out of its expanded LUT table.
+  return {
       {EP_D0, EP_D1, EP_D2, EP_D3, EP_D4, EP_D5, EP_D6, EP_D7},
       EP_STH,
       EP_STV,
@@ -168,15 +189,29 @@ const LgfxEpdConfig& lilygoT5S3LgfxConfig() {
       8,
       0,
       {&prepareEpdPower, &epdPowerOn, &epdPowerOff},
-      nullptr,
-      0,
-      nullptr,
-      0,
-      kFastLut,
-      sizeof(kFastLut) / sizeof(kFastLut[0]),
-      kFastLut,
-      sizeof(kFastLut) / sizeof(kFastLut[0]),
+      lut,
+      step,
+      lut,
+      step,
+      lut,
+      step,
+      lut,
+      step,
+      true,  // twoLevelWaveform
   };
+}
+
+}  // namespace
+
+namespace freeink {
+
+const LgfxEpdConfig& lilygoT5S3LgfxConfig() {
+  // Built once, on the first call, which is the driver's begin(): LovyanGFX
+  // expands the LUTs into its own tables at panel init and never re-reads them,
+  // so the temperature the waveform is chosen for is the temperature at boot.
+  // The reader deep-sleeps between sessions and re-runs setup() on wake, so in
+  // practice the waveform tracks the ambient temperature session by session.
+  static const LgfxEpdConfig cfg = buildConfig();
   return cfg;
 }
 
