@@ -218,28 +218,36 @@ void sleepPanel() {
   g_dev.sleep();
 }
 
-// Ghost-clearing pass for a clean refresh on a two-level waveform: drive the
-// whole screen to white, then let the caller's frame drive the dark pixels back
-// down, so every pixel that ends up black takes a full white->black transition.
+// Ghost-clearing pass for a clean refresh on a two-level waveform: flash the
+// whole screen white, then black, and let the caller's frame bring the white
+// pixels back.
 //
-// White, not black, and the reason is Panel_EPD's per-pixel diff: it only drives
-// pixels whose value actually changes, so a flash to black skips every pixel that
-// is *already* black -- exactly the text -- and the clean refresh then leaves the
-// glyphs sitting at whatever charge a long run of differential updates had left
-// them at. That reads as text going soft after the flash and only firming up once
-// a few page turns happen to move the glyphs onto different pixels. Flashing to
-// white inverts that: the text is the part that changes, so the text is the part
-// that gets re-driven, at full length, every clean refresh.
+// It takes both flashes, because Panel_EPD only drives pixels whose value
+// changes and a single flash can therefore never touch the whole screen. Flash
+// to black and every pixel that is already black -- the text -- is skipped and
+// left at whatever charge a long run of differential updates put there. Flash to
+// white and the background is the part that gets skipped instead. Either way the
+// pixels that were skipped keep their residue, which is precisely the ghosting a
+// clean refresh exists to clear.
 //
-// The impulse balances either way. A transition costs the panel L frames in one
-// direction, so a pixel that was black and stays black takes +L here and -L from
-// the frame push and nets zero, while one that was white and stays white is
-// skipped by the diff in both passes and takes no drive at all.
+// Two flashes leave nothing out. The first drives every dark pixel up, which
+// makes the screen uniformly white; the second then changes *every* pixel, so
+// every pixel takes a full white->black transition. The caller's frame push
+// afterwards drives the white ones back up.
+//
+// The impulse still balances. Writing L for the frames one transition costs:
+// a pixel that ends white took 0/-L/+L if it was already white and +L/-L/+L if it
+// was black, and one that ends black took 0/-L/0 or +L/-L/0 -- which is 0 or +L
+// for white and -L or 0 for black, exactly what the panel's own waveform asks for
+// each of those transitions.
 void flashCanvas() {
   if (!g_canvas) return;
   auto* dst = static_cast<uint8_t*>(g_canvas->getBuffer());
   if (!dst) return;
-  memset(dst, kGrayWhite, static_cast<size_t>(g_w) * g_h);
+  const size_t pixels = static_cast<size_t>(g_w) * g_h;
+  memset(dst, kGrayWhite, pixels);
+  pushCanvas(lgfx::epd_mode::epd_fast);
+  memset(dst, kGrayBlack, pixels);
   pushCanvas(lgfx::epd_mode::epd_fast);
 }
 
