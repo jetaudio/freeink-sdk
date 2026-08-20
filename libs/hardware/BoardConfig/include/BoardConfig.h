@@ -1707,6 +1707,9 @@ inline void releaseSdRail() {
     digitalWrite(ACTIVE.sd.powerEnable, ACTIVE.sd.powerActiveHigh ? HIGH : LOW);
   }
   if (ACTIVE.sd.cs >= 0) {
+    // On boards with no SD rail the sleep path latches CS deasserted with
+    // gpio_hold_en; the hold survives reset and would swallow the write below.
+    gpio_hold_dis(static_cast<gpio_num_t>(ACTIVE.sd.cs));
     pinMode(ACTIVE.sd.cs, OUTPUT);
     digitalWrite(ACTIVE.sd.cs, HIGH);
   }

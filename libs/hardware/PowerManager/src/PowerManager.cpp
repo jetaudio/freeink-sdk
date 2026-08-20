@@ -85,6 +85,14 @@ void PowerManager::powerDownRailsForSleep() {
   // SD enable OFF = the inactive level: LOW for active-high enables, HIGH for the
   // active-low ones (e.g. X4 Pro's GPIO5, which powers the card while held LOW).
   holdRailOff(b.sd.powerEnable, b.sd.powerActiveHigh ? LOW : HIGH);
+  // With no rail to cut, the card stays powered through sleep, and
+  // esp_sleep_config_gpio_isolate() would leave its chip-select floating — an
+  // undefined selection state for a card that is still listening. Hold CS
+  // DEASSERTED (HIGH) instead, so it idles deselected. Skipped where the rail
+  // IS cut, for the same reason RESET is not held HIGH there: driving an input
+  // of an unpowered chip can back-power it through its protection diode.
+  // SDCardManager::begin() and BoardConfig::releaseSdRail() drop the hold.
+  if (b.sd.powerEnable < 0) holdRailOff(b.sd.cs, HIGH);
   holdRailOff(b.touch.powerEnable, b.touch.powerEnableActiveHigh ? LOW : HIGH);
   // Boards with no touch rail have nothing to cut, so the digitizer would keep
   // scanning all through deep sleep — a GT911 costs several mA there, which on
