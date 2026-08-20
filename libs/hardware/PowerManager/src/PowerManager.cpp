@@ -86,6 +86,13 @@ void PowerManager::powerDownRailsForSleep() {
   // active-low ones (e.g. X4 Pro's GPIO5, which powers the card while held LOW).
   holdRailOff(b.sd.powerEnable, b.sd.powerActiveHigh ? LOW : HIGH);
   holdRailOff(b.touch.powerEnable, b.touch.powerEnableActiveHigh ? LOW : HIGH);
+  // Boards with no touch rail have nothing to cut, so the digitizer would keep
+  // scanning all through deep sleep — a GT911 costs several mA there, which on
+  // its own is the difference between a milliamp-class and a microamp-class
+  // sleep. Park it in reset instead (asserted LOW). Opt-in per board: see
+  // TouchConfig::holdResetInSleep for why this is not inferred from a missing
+  // powerEnable. InputManager's touch bring-up releases the hold on wake.
+  if (b.touch.holdResetInSleep) holdRailOff(b.touch.reset, LOW);
   // The mic enable also carries a polarity flag; OFF is the inactive level.
   holdRailOff(b.mic.enable, b.mic.enableActiveHigh ? LOW : HIGH);
 }

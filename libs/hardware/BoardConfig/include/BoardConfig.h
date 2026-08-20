@@ -517,6 +517,21 @@ struct TouchConfig {
   // controller). false = active-LOW (drive LOW to power it, e.g. X4 Pro's GPIO2). The
   // reset path drives the ON level; the sleep path drives the OFF level.
   bool powerEnableActiveHigh = true;
+  // Park the controller by holding `reset` asserted (LOW) through deep sleep.
+  // For boards with NO switched touch rail (powerEnable unassigned, e.g. the
+  // LilyGo T5 S3): there is nothing to cut, so without this the digitizer keeps
+  // scanning all through "off" — a GT911 costs several mA there, an order of
+  // magnitude more than everything else on a sleeping board put together.
+  // Held in reset it drops to a few µA.
+  //
+  // Opt-in per board rather than inferred from `powerEnable < 0`, because a pin
+  // called "reset" is not always one: MURPHY_M3's touch pin 45 is an active-LOW
+  // PMOS power gate, so driving it LOW would POWER the controller — the exact
+  // opposite of the intent — on the one board the inference would silently
+  // catch. PowerManager::powerDownRailsForSleep() latches the level with
+  // gpio_hold_en(); the touch bring-up paths in InputManager release the hold
+  // before their reset pulse, or touch is dead after the first wake.
+  bool holdResetInSleep = false;
 };
 
 // PWM frontlight description (gpio == PIN_UNASSIGNED disables it).
@@ -695,8 +710,11 @@ constexpr TouchConfig NO_TOUCH = {TouchController::None,
 // panel-native display frame before app-level orientation mapping.
 constexpr TouchConfig LILYGO_T5_PRO_GT911 = {
     TouchController::Gt911, 39,   40,    3,   9,     0x5D, 0, 959, 0, 539, false, 0x14, false, true,
-    PIN_UNASSIGNED,         true, false, true, true};  // powerEnable, swapXY=true, flipX=false, flipY=true,
+    PIN_UNASSIGNED,         true, false, true, true,   // powerEnable, swapXY=true, flipX=false, flipY=true,
                                                        // hasHomeKey: capacitive front key on the GT911 (status 0x10)
+    true,   // powerEnableActiveHigh: unused (no rail), spelled out to reach the field below
+    true};  // holdResetInSleep: nothing gates this GT911's power, so deep sleep parks it in
+            // reset on T_RST (GPIO9) instead — see TouchConfig::holdResetInSleep
 constexpr FrontlightConfig NO_FRONTLIGHT = {PIN_UNASSIGNED, 0, 0, true};
 constexpr AudioConfig NO_AUDIO = {AudioOutput::None,
                                   PIN_UNASSIGNED,
