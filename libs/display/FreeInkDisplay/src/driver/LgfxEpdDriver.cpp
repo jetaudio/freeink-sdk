@@ -107,11 +107,7 @@ class FreeInkLgfxEpd : public lgfx::LGFX_Device {
 
 FreeInkLgfxEpd g_dev;
 
-lgfx::epd_mode::epd_mode_t epdModeFor(RefreshMode m, bool twoLevelWaveform) {
-  // A board that supplies one two-level panel waveform has nothing to switch to:
-  // every mode holds the same LUT, and changing epd_mode would defeat the diff
-  // (see LgfxEpdConfig::twoLevelWaveform). Clean refreshes flash instead.
-  if (twoLevelWaveform) return lgfx::epd_mode::epd_fast;
+lgfx::epd_mode::epd_mode_t epdModeFor(RefreshMode m) {
   switch (m) {
     case RefreshMode::Full: return lgfx::epd_mode::epd_text;
     case RefreshMode::Half: return lgfx::epd_mode::epd_text;
@@ -188,67 +184,12 @@ void fillCanvasGray(const uint8_t* base) {
   }
 }
 
-// Queue a frame and return; Panel_EPD drives the waveform from its own task.
-//
-// Waiting the refresh out here would park the Arduino loop for its whole
-// duration, and that loop is the only thing that samples input: the GT911 is
-// polled over I2C with no interrupt, and InputManager::beginAsync (which would
-// queue events from a background task) is never started. A button survives the
-// gap because it is still physically down when polling resumes, but a tap is a
-// transient -- finger down and up inside the gap leaves no trace at all, so the
-// press is silently lost and the user has to tap again.
-//
-// The wait at the top is what keeps this safe. pushSprite() has already copied
-// the canvas into Panel_EPD's _buf by the time it returns, so the caller's
-// framebuffer and the canvas are both free immediately; only _buf must not be
-// rewritten before the panel task has consumed it, which is exactly what the
-// leading wait enforces. Anything that drops the rails must waitDisplay() first
-// -- see sleepPanel().
 void pushCanvas(lgfx::epd_mode::epd_mode_t epdMode) {
   if (!g_canvas) return;
   g_dev.waitDisplay();
   g_dev.setEpdMode(epdMode);
-  g_canvas->pushSprite(0, 0);  // commits to _buf; the panel task runs the refresh
-}
-
-// Park the panel. The refresh has to finish before the rails drop, or the frame
-// is left half-driven on the glass.
-void sleepPanel() {
+  g_canvas->pushSprite(0, 0);  // commits to the panel; Panel_EPD runs the refresh
   g_dev.waitDisplay();
-  g_dev.sleep();
-}
-
-// Ghost-clearing pass for a clean refresh on a two-level waveform: flash the
-// whole screen white, then black, and let the caller's frame bring the white
-// pixels back.
-//
-// It takes both flashes, because Panel_EPD only drives pixels whose value
-// changes and a single flash can therefore never touch the whole screen. Flash
-// to black and every pixel that is already black -- the text -- is skipped and
-// left at whatever charge a long run of differential updates put there. Flash to
-// white and the background is the part that gets skipped instead. Either way the
-// pixels that were skipped keep their residue, which is precisely the ghosting a
-// clean refresh exists to clear.
-//
-// Two flashes leave nothing out. The first drives every dark pixel up, which
-// makes the screen uniformly white; the second then changes *every* pixel, so
-// every pixel takes a full white->black transition. The caller's frame push
-// afterwards drives the white ones back up.
-//
-// The impulse still balances. Writing L for the frames one transition costs:
-// a pixel that ends white took 0/-L/+L if it was already white and +L/-L/+L if it
-// was black, and one that ends black took 0/-L/0 or +L/-L/0 -- which is 0 or +L
-// for white and -L or 0 for black, exactly what the panel's own waveform asks for
-// each of those transitions.
-void flashCanvas() {
-  if (!g_canvas) return;
-  auto* dst = static_cast<uint8_t*>(g_canvas->getBuffer());
-  if (!dst) return;
-  const size_t pixels = static_cast<size_t>(g_w) * g_h;
-  memset(dst, kGrayWhite, pixels);
-  pushCanvas(lgfx::epd_mode::epd_fast);
-  memset(dst, kGrayBlack, pixels);
-  pushCanvas(lgfx::epd_mode::epd_fast);
 }
 
 }  // namespace
@@ -279,12 +220,9 @@ void LgfxEpdDriver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev,
   (void)bus;
   (void)prev;
 #if FREEINK_DRIVER_LGFX_EPD
-  // A clean refresh on a two-level waveform flashes to black first; the frame
-  // push below then drives every white pixel back through a full transition.
-  if (_cfg.twoLevelWaveform && mode != RefreshMode::Fast) flashCanvas();
   fillCanvasBW(fb);          // expand the 1-bpp frame into the gray canvas
-  pushCanvas(epdModeFor(mode, _cfg.twoLevelWaveform));
-  if (turnOff) sleepPanel();
+  pushCanvas(epdModeFor(mode));
+  if (turnOff) g_dev.sleep();
 #else
   (void)fb;
   (void)mode;
@@ -338,7 +276,7 @@ void LgfxEpdDriver::displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, co
   // (full-screen inversion flash). The board's fast LUT carries both the B/W
   // drive and the AA gray-nudge columns, so one mode serves both pushes.
   pushCanvas(lgfx::epd_mode::epd_fast);
-  if (turnOff) sleepPanel();
+  if (turnOff) g_dev.sleep();
 #else
   (void)fb;
   (void)turnOff;
@@ -358,7 +296,7 @@ void LgfxEpdDriver::cleanupGrayscaleBuffers(EpdBus& bus, const uint8_t* bw) {
 void LgfxEpdDriver::deepSleep(EpdBus& bus) {
   (void)bus;
 #if FREEINK_DRIVER_LGFX_EPD
-  sleepPanel();
+  g_dev.sleep();
 #endif
 }
 

@@ -30,11 +30,17 @@ struct TempRange {
 
 extern const TempRange kTempRanges[kTempRangeCount];
 
-// Panel_EPD LUT for the vendor's DU (two-level) waveform in each range, and its
-// length in frames. CrossPoint only ever puts two levels on this panel, so this
-// is the whole waveform it needs; see the generated file for why.
+// The vendor's DU (two-level) waveform in each range, for Panel_EPD's
+// differential modes (epd_fast / epd_fastest).
 extern const uint32_t* const kDuLut[kTempRangeCount];
 extern const size_t kDuLutStep[kTempRangeCount];
+
+// The clean refresh, for epd_text / epd_quality. Those modes re-drive every
+// non-white pixel whether or not it changed, so this one is charge neutral: it
+// drives each level away from its target and back again, which nets zero and
+// puts every re-driven pixel through a full rail-to-rail excursion.
+extern const uint32_t* const kCleanLut[kTempRangeCount];
+extern const size_t kCleanLutStep[kTempRangeCount];
 
 // Frames of drive a full black<->white transition takes in each range. Exposed
 // for logging and for sizing refresh timeouts.

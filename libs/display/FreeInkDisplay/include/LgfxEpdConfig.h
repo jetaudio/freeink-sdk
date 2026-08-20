@@ -36,14 +36,6 @@ struct LgfxEpdConfig {
   size_t lutFastStep = 0;
   const uint32_t* lutFastest = nullptr;
   size_t lutFastestStep = 0;
-
-  // Set when the LUTs above are one two-level (black/white) panel waveform
-  // rather than four graded ones. The driver then keeps every push in
-  // epd_fast and clears ghosts with a black flash pass, because switching
-  // epd_mode would cost more than it buys: Panel_EPD's per-pixel diff stores
-  // the mode's LUT offset next to the pixel value, so a mode change re-drives
-  // the entire screen on that update and again on the next one back.
-  bool twoLevelWaveform = false;
 };
 
 }  // namespace freeink

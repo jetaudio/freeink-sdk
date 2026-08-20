@@ -174,8 +174,10 @@ freeink::LgfxEpdConfig buildConfig() {
   const bool measuredOk = readPanelTemperature(&measured);
   const int tempC = measuredOk ? measured : kAssumedTemperatureC;
   const size_t range = freeink::ed047tc2::tempRangeIndex(tempC);
-  const uint32_t* lut = freeink::ed047tc2::kDuLut[range];
-  const size_t step = freeink::ed047tc2::kDuLutStep[range];
+  const uint32_t* du = freeink::ed047tc2::kDuLut[range];
+  const size_t duStep = freeink::ed047tc2::kDuLutStep[range];
+  const uint32_t* clean = freeink::ed047tc2::kCleanLut[range];
+  const size_t cleanStep = freeink::ed047tc2::kCleanLutStep[range];
 
   // Worth a line on the console: the drive length is the single number that
   // decides how the panel looks, it is chosen once and never revisited, and a
@@ -186,12 +188,12 @@ freeink::LgfxEpdConfig buildConfig() {
                 freeink::ed047tc2::kTempRanges[range].minC, freeink::ed047tc2::kTempRanges[range].maxC,
                 freeink::ed047tc2::kDriveFrames[range]);
 
-  // Every epd_mode gets the same panel waveform. CrossPoint only ever puts two
-  // levels on this panel — LovyanGFX binarises and dithers the canvas on the
-  // fast path — so the vendor's DU waveform covers every transition it can ask
-  // for. The driver only ever selects epd_fast here (twoLevelWaveform), but
-  // filling all four slots keeps LovyanGFX's generic LUTs, which are tuned for a
-  // different panel, out of the build and out of its expanded LUT table.
+  // Only the LUTs change here; the driver keeps LovyanGFX's stock behaviour and
+  // its stock mapping of refresh mode to epd_mode. Each slot gets the waveform
+  // that matches how Panel_EPD drives it: the differential modes get the vendor
+  // DU table, and the two modes that re-drive unchanged pixels get the charge
+  // neutral clean refresh. Filling all four keeps LovyanGFX's generic LUTs,
+  // which are tuned for a different panel, out of the picture entirely.
   return {
       {EP_D0, EP_D1, EP_D2, EP_D3, EP_D4, EP_D5, EP_D6, EP_D7},
       EP_STH,
@@ -205,15 +207,14 @@ freeink::LgfxEpdConfig buildConfig() {
       8,
       0,
       {&prepareEpdPower, &epdPowerOn, &epdPowerOff},
-      lut,
-      step,
-      lut,
-      step,
-      lut,
-      step,
-      lut,
-      step,
-      true,  // twoLevelWaveform
+      clean,      // lutQuality
+      cleanStep,
+      clean,      // lutText   — Full/Half refreshes
+      cleanStep,
+      du,         // lutFast   — page turns and the AA overlay push
+      duStep,
+      du,         // lutFastest
+      duStep,
   };
 }
 

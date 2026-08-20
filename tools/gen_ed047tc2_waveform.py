@@ -156,7 +156,11 @@ def check(tables, intervals):
     return impulses
 
 
-LUT_ROW = "    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),"
+DU_ROW = "    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),"
+# Away from the target: dark levels get driven white, light levels black.
+CLEAN_AWAY_ROW = "    LUT_MAKE(2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1),"
+# ...then back onto it, the same number of frames, so the net is zero.
+CLEAN_ONTO_ROW = "    LUT_MAKE(1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2),"
 
 HEADER = '''// GENERATED FILE -- DO NOT EDIT BY HAND.
 //
@@ -174,13 +178,23 @@ HEADER = '''// GENERATED FILE -- DO NOT EDIT BY HAND.
 //
 {impulse_comment}
 //
-// CrossPoint drives this panel with two levels only, so every transition it can
-// ask for is +/- L[15] frames -- which is exactly what the vendor DU tables do,
-// as `L[15]` consecutive frames from phase 0. That reduces to the LUTs here: one
-// per distinct drive length, holding `drive` identical frames that push level 0
-// toward black and level 15 toward white, then a terminating all-zero frame.
-// Levels 1..14 are no-ops, matching the vendor DU tables, which leave every
-// destination other than black and white undriven.
+// CrossPoint drives this panel with two levels only -- the canvas is quantised to
+// black and white before any LUT is indexed -- so every transition it can ask for
+// is +/- L[15] frames. Two families of LUT come out of that.
+//
+// kDuLut, for the differential modes (epd_fast / epd_fastest), is the vendor DU
+// table verbatim: `L[15]` identical frames pushing level 0 toward black and level
+// 15 toward white, then a terminating all-zero frame. Levels 1..14 stay no-ops,
+// matching the vendor tables, which leave every destination other than the two
+// rails undriven.
+//
+// kCleanLut, for epd_text / epd_quality, is the clean refresh. Those modes re-drive
+// every non-white pixel whether or not it changed, so this LUT has to be charge
+// neutral or a run of clean refreshes would pump a bias into the text. It spends
+// `L[15]` frames driving each level *away* from where it is headed and the same
+// number driving it back, which nets exactly zero and puts every re-driven pixel
+// through a full rail-to-rail excursion -- which is what shakes out the residue a
+// long run of differential updates leaves behind.
 //
 // Keeping the drive length matched to the panel temperature IS the temperature
 // compensation: e-ink particles move more slowly when cold, so a cold panel needs
@@ -214,11 +228,19 @@ const TempRange kTempRanges[kTempRangeCount] = {{
 }};
 
 const uint32_t* const kDuLut[kTempRangeCount] = {{
-{lut_ptrs}
+{du_ptrs}
 }};
 
 const size_t kDuLutStep[kTempRangeCount] = {{
-{lut_steps}
+{du_steps}
+}};
+
+const uint32_t* const kCleanLut[kTempRangeCount] = {{
+{clean_ptrs}
+}};
+
+const size_t kCleanLutStep[kTempRangeCount] = {{
+{clean_steps}
 }};
 
 const uint8_t kDriveFrames[kTempRangeCount] = {{{drive_frames}}};
@@ -253,18 +275,27 @@ def main():
 
     body = HEADER.format(impulse_comment=impulse_comment)
     for drive in sorted(set(drives)):
-        body += "// %d drive frames\n" % drive
-        body += "constexpr uint32_t kLut%d[] = {\n" % drive
-        body += (LUT_ROW + "\n") * drive
+        body += "// Differential update, %d drive frames.\n" % drive
+        body += "constexpr uint32_t kDu%d[] = {\n" % drive
+        body += (DU_ROW + "\n") * drive
+        body += "    0u,\n};\n\n"
+        body += "// Clean refresh, %d frames away from the target then %d back.\n" % (drive, drive)
+        body += "constexpr uint32_t kClean%d[] = {\n" % drive
+        body += (CLEAN_AWAY_ROW + "\n") * drive
+        body += (CLEAN_ONTO_ROW + "\n") * drive
         body += "    0u,\n};\n\n"
 
     body += FOOTER.format(
         ranges="\n".join(
             "    {%d, %d}," % (intervals[r][0], intervals[r][1]) for r in ranges
         ),
-        lut_ptrs="\n".join("    kLut%d," % d for d in drives),
-        lut_steps="\n".join(
-            "    sizeof(kLut%d) / sizeof(kLut%d[0])," % (d, d) for d in drives
+        du_ptrs="\n".join("    kDu%d," % d for d in drives),
+        du_steps="\n".join(
+            "    sizeof(kDu%d) / sizeof(kDu%d[0])," % (d, d) for d in drives
+        ),
+        clean_ptrs="\n".join("    kClean%d," % d for d in drives),
+        clean_steps="\n".join(
+            "    sizeof(kClean%d) / sizeof(kClean%d[0])," % (d, d) for d in drives
         ),
         drive_frames=", ".join(str(d) for d in drives),
     )
