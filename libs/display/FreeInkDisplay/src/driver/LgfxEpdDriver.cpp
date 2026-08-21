@@ -122,16 +122,20 @@ uint8_t* g_lsb = nullptr;
 uint8_t* g_msb = nullptr;
 uint16_t g_w = 0, g_h = 0, g_wb = 0;
 
-constexpr uint8_t kGrayBlack = 0x00, kGrayDark = 0x55, kGrayLight = 0xAA, kGrayWhite = 0xFF;
+// 0x00 and 0xFF survive Panel_EPD's quantiser at both rails whatever the Bayer
+// cell (it clamps), so the two rails need no board input. The greys do -- see
+// LgfxEpdConfig::grayDark.
+constexpr uint8_t kGrayBlack = 0x00, kGrayWhite = 0xFF;
+uint8_t g_grayDark = 0, g_grayLight = 0;
 
 // (base, lsb, msb) per pixel -> 4 gray levels, matching the reference port: a set
 // base bit is white; otherwise msb/lsb pick light/dark; clear is black.
 inline uint8_t grayValue(uint8_t base, uint8_t lsb, uint8_t msb, uint8_t mask) {
   if (base & mask) return kGrayWhite;
   const bool l = lsb & mask, m = msb & mask;
-  if (m && l) return kGrayDark;
-  if (m) return kGrayLight;
-  if (l) return kGrayDark;
+  if (m && l) return g_grayDark;
+  if (m) return g_grayLight;
+  if (l) return g_grayDark;
   return kGrayBlack;
 }
 
@@ -192,6 +196,33 @@ void pushCanvas(lgfx::epd_mode::epd_mode_t epdMode) {
   g_dev.waitDisplay();
 }
 
+// Push the canvas keeping its grey levels, then refresh through the differential
+// bank.
+//
+// Panel_EPD reads the epd_mode twice, at two different moments, and they do not
+// have to agree. _draw_pixels() reads it while the sprite is being copied into
+// the panel's 4bpp buffer, and in epd_fast/epd_fastest it Bayer-dithers every
+// pixel to one of the two rails there and then -- that is what turned the AA
+// greys into hard black speckle along glyph edges. task_update() reads it again
+// when the refresh is queued, and only the fast modes skip lut_eraser, the
+// preliminary pass that drives everything toward mid grey and shows as a flash.
+//
+// Splitting auto-display lets each read see the mode it should: quality while the
+// pixels land (16 levels, no dither), fast when the refresh goes out (no eraser,
+// and the same LUT bank the B/W base used, so Panel_EPD's per-pixel diff still
+// skips everything that did not change).
+void pushCanvasGraded() {
+  if (!g_canvas) return;
+  g_dev.waitDisplay();
+  g_dev.setEpdMode(lgfx::epd_mode::epd_quality);
+  g_dev.setAutoDisplay(false);
+  g_canvas->pushSprite(0, 0);  // writes the panel buffer, queues no refresh
+  g_dev.setAutoDisplay(true);
+  g_dev.setEpdMode(lgfx::epd_mode::epd_fast);
+  g_dev.display();  // covers the rect pushSprite accumulated
+  g_dev.waitDisplay();
+}
+
 }  // namespace
 #endif  // FREEINK_DRIVER_LGFX_EPD
 
@@ -212,6 +243,8 @@ void LgfxEpdDriver::begin(EpdBus& bus) {
   g_dev.init();
   g_dev.setRotation(_cfg.rotation);
   g_dev.setEpdMode(lgfx::epd_mode::epd_fast);
+  g_grayDark = _cfg.grayDark;
+  g_grayLight = _cfg.grayLight;
   allocCanvas(BoardConfig::ACTIVE.displayWidth, BoardConfig::ACTIVE.displayHeight);
 #endif
 }
@@ -271,11 +304,11 @@ void LgfxEpdDriver::displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, co
   (void)factoryMode;
 #if FREEINK_DRIVER_LGFX_EPD
   fillCanvasGray(fb);  // combine base + LSB/MSB planes -> 4-level gray
-  // Same mode as the B/W base push: Panel_EPD's per-pixel diff keys on the
-  // epd_mode LUT offset, so switching modes here would re-drive every pixel
-  // (full-screen inversion flash). The board's fast LUT carries both the B/W
-  // drive and the AA gray-nudge columns, so one mode serves both pushes.
-  pushCanvas(lgfx::epd_mode::epd_fast);
+  if (_cfg.grayNudgeInFastBank) {
+    pushCanvasGraded();
+  } else {
+    pushCanvas(lgfx::epd_mode::epd_fast);
+  }
   if (turnOff) g_dev.sleep();
 #else
   (void)fb;

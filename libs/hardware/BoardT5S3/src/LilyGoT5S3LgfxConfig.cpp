@@ -174,24 +174,29 @@ freeink::LgfxEpdConfig buildConfig() {
   const bool measuredOk = readPanelTemperature(&measured);
   const int tempC = measuredOk ? measured : kAssumedTemperatureC;
   const size_t range = freeink::ed047tc2::tempRangeIndex(tempC);
-  const uint32_t* du = freeink::ed047tc2::kDuLut[range];
-  const size_t duStep = freeink::ed047tc2::kDuLutStep[range];
+  const uint32_t* fast = freeink::ed047tc2::kFastLut[range];
+  const size_t fastStep = freeink::ed047tc2::kFastLutStep[range];
   const uint32_t* clean = freeink::ed047tc2::kCleanLut[range];
   const size_t cleanStep = freeink::ed047tc2::kCleanLutStep[range];
+  // The grey columns of the fast bank are cut for these two levels in this range,
+  // so the canvas has to address exactly them. Reading both from the same table
+  // index is what keeps the two in step when the waveform is regenerated.
+  const uint8_t grayDark = freeink::grayLevelByte(freeink::ed047tc2::kGrayLevelDark[range]);
+  const uint8_t grayLight = freeink::grayLevelByte(freeink::ed047tc2::kGrayLevelLight[range]);
 
   // Worth a line on the console: the drive length is the single number that
   // decides how the panel looks, it is chosen once and never revisited, and a
   // thermistor that reads high silently under-drives every transition. Without
   // this there is no way to tell a waveform problem from a wrong temperature.
-  Serial.printf("[epd] panel %d C%s -> waveform range %u (%u..%u C), %u drive frames\n", tempC,
-                measuredOk ? "" : " (assumed, thermistor read failed)", static_cast<unsigned>(range),
+  Serial.printf("[epd] panel %d C%s -> waveform range %u (%u..%u C), %u drive frames, AA greys at level %u/%u\n",
+                tempC, measuredOk ? "" : " (assumed, thermistor read failed)", static_cast<unsigned>(range),
                 freeink::ed047tc2::kTempRanges[range].minC, freeink::ed047tc2::kTempRanges[range].maxC,
-                freeink::ed047tc2::kDriveFrames[range]);
+                freeink::ed047tc2::kDriveFrames[range], freeink::ed047tc2::kGrayLevelDark[range],
+                freeink::ed047tc2::kGrayLevelLight[range]);
 
-  // Only the LUTs change here; the driver keeps LovyanGFX's stock behaviour and
-  // its stock mapping of refresh mode to epd_mode. Each slot gets the waveform
-  // that matches how Panel_EPD drives it: the differential modes get the vendor
-  // DU table, and the two modes that re-drive unchanged pixels get the charge
+  // Each slot gets the waveform that matches how Panel_EPD drives it: the
+  // differential modes get the vendor DU table extended with the two AA grey
+  // columns, and the two modes that re-drive unchanged pixels get the charge
   // neutral clean refresh. Filling all four keeps LovyanGFX's generic LUTs,
   // which are tuned for a different panel, out of the picture entirely.
   return {
@@ -211,10 +216,13 @@ freeink::LgfxEpdConfig buildConfig() {
       cleanStep,
       clean,      // lutText   — Full/Half refreshes
       cleanStep,
-      du,         // lutFast   — page turns and the AA overlay push
-      duStep,
-      du,         // lutFastest
-      duStep,
+      fast,       // lutFast   — page turns and the AA overlay push
+      fastStep,
+      fast,       // lutFastest
+      fastStep,
+      grayDark,
+      grayLight,
+      true,  // grey columns live in the fast bank above
   };
 }
 

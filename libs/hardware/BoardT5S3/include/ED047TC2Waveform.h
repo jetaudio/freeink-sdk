@@ -30,10 +30,21 @@ struct TempRange {
 
 extern const TempRange kTempRanges[kTempRangeCount];
 
-// The vendor's DU (two-level) waveform in each range, for Panel_EPD's
-// differential modes (epd_fast / epd_fastest).
-extern const uint32_t* const kDuLut[kTempRangeCount];
-extern const size_t kDuLutStep[kTempRangeCount];
+// The bank Panel_EPD's differential modes (epd_fast / epd_fastest) run: the
+// vendor DU waveform for the two rails, plus a nudge column for each of the two
+// anti-aliasing greys. One bank carries both because Panel_EPD folds the bank
+// offset into its per-pixel progress value -- pushing the B/W base and the greys
+// under different epd_modes makes every pixel compare unequal and re-drives the
+// whole screen.
+extern const uint32_t* const kFastLut[kTempRangeCount];
+extern const size_t kFastLutStep[kTempRangeCount];
+
+// The two canvas levels the grey columns above are cut for, per range. The grey
+// nudge is from-black and destination-indexed, so a canvas that writes any other
+// level lands on a column the LUT leaves undriven and the pixel stays black.
+// LilyGoT5S3LgfxConfig turns these into the canvas bytes the driver writes.
+extern const uint8_t kGrayLevelDark[kTempRangeCount];
+extern const uint8_t kGrayLevelLight[kTempRangeCount];
 
 // The clean refresh, for epd_text / epd_quality. Those modes re-drive every
 // non-white pixel whether or not it changed, so this one is charge neutral: it

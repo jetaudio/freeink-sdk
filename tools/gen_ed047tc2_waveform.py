@@ -34,10 +34,17 @@ temperature range: the drive length.  This script asserts all of that against th
 blob before emitting anything, so a different or corrupted input fails loudly
 rather than producing a plausible-looking wrong waveform.
 
-CrossPoint only ever puts two levels on this panel (LovyanGFX's epd_fast path
-binarises the canvas and dithers), so the DU tables are the whole waveform it
-needs.  The full impulse vectors are emitted as a comment for future 16-level
-work.
+The emitted `epd_fast` bank is the DU table plus two grey columns.  DU itself only
+defines the two rails, but the impulse vector gives the cost of every other
+level, so a destination-indexed nudge for the AA greys drops straight out of it:
+level `g` reached from black costs `L[g]` frames of drive toward white.  That is
+only valid because the B/W base push leaves every AA fringe pixel at black before
+the grey push runs -- see ED047TC2Waveform.cpp for the full argument.
+
+Both greys live in the *same* bank as the B/W drive on purpose.  Panel_EPD stores
+the LUT bank offset inside its per-pixel progress value, so a base push and a grey
+push in different epd_modes make every pixel compare unequal and re-drive the whole
+screen.  One bank, two pushes, diff intact.
 """
 
 import re
@@ -46,7 +53,7 @@ from pathlib import Path
 
 BLOB_RE = re.compile(
     r"const uint8_t epd_wp_ED047TC2_(\d+)_(\d+)_data\[(\d+)\]\[16\]\[4\]\s*=\s*(.*?);",
-    re.S,
+    re.S | re.I,
 )
 INTERVAL_RE = re.compile(
     r"const EpdWaveformTempInterval ed047tc2_intervals\[(\d+)\]\s*=\s*(.*?);", re.S
@@ -156,7 +163,59 @@ def check(tables, intervals):
     return impulses
 
 
-DU_ROW = "    LUT_MAKE(1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2),"
+# Optical targets for the two AA greys, as a fraction of the way from black to
+# white. The 2-bit font quantises a glyph edge to 25-50% ink (its light grey) and
+# 50-75% ink (its dark grey), so the midpoints of those buckets are what the panel
+# should land on.
+GRAY_TARGET_DARK = 0.375
+GRAY_TARGET_LIGHT = 0.625
+
+# A grey is only usable if it stays clear of white and clear of the other grey.
+GRAY_MAX_FRACTION = 0.95
+GRAY_MIN_SEPARATION = 0.08
+
+
+def pick_gray_levels(impulse):
+    """Pick the (dark, light) canvas levels that best hit the targets in one range.
+
+    The vendor impulse vector is not evenly spaced and its spacing changes with
+    temperature -- at 33..38 C levels 12..15 are all the same optical white, so a
+    level that reads as a good light grey when cold is no grey at all when warm.
+    Choosing per range is what keeps both greys real across the whole table.
+    """
+    white = impulse[15]
+    frac = [impulse[lv] / white for lv in range(16)]
+
+    best = None
+    for dark in range(1, 15):
+        for light in range(dark + 1, 15):
+            if frac[light] > GRAY_MAX_FRACTION:
+                continue
+            if frac[light] - frac[dark] < GRAY_MIN_SEPARATION:
+                continue
+            err = (frac[dark] - GRAY_TARGET_DARK) ** 2 + (frac[light] - GRAY_TARGET_LIGHT) ** 2
+            if best is None or err < best[0]:
+                best = (err, dark, light)
+    if best is None:
+        raise SystemExit("no usable grey pair for impulse %s" % impulse)
+    return best[1], best[2]
+
+
+def fast_row(frame, l_dark, l_light, dark, light):
+    """One frame of the epd_fast bank: the two B/W rails plus the grey nudges."""
+    codes = [3] * 16
+    codes[0] = 1  # headed for black: driven black for the whole bank
+    codes[15] = 2  # headed for white: driven white for the whole bank
+    # A grey destination is driven toward white for exactly L[level] frames and
+    # then parked. That lands it on `level` only if it started at black, which is
+    # what the B/W base push guarantees.
+    if frame < l_dark:
+        codes[dark] = 2
+    if frame < l_light:
+        codes[light] = 2
+    return "    LUT_MAKE(%s)," % ", ".join(str(c) for c in codes)
+
+
 # Away from the target: dark levels get driven white, light levels black.
 CLEAN_AWAY_ROW = "    LUT_MAKE(2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1),"
 # ...then back onto it, the same number of frames, so the net is zero.
@@ -167,7 +226,9 @@ HEADER = '''// GENERATED FILE -- DO NOT EDIT BY HAND.
 // Regenerate with:
 //     python tools/gen_ed047tc2_waveform.py <vendor ED047TC2 waveform header>
 //
-// Source: the ED047TC2 vendor waveform shipped in epdiy form (epdiy_ED047TC2.h).
+// Source: the ED047TC2 vendor waveform in epdiy form -- LilyGo ships it as
+// Waveform_header/ED047TC2.h in Xinyuan-LilyGO/LilyGo-EPD47, epdiy as
+// epdiy_ED047TC2.h; the two are the same data under different symbol names.
 // See tools/gen_ed047tc2_waveform.py for the blob layout and for the structural
 // checks the generator runs against it.
 //
@@ -178,15 +239,32 @@ HEADER = '''// GENERATED FILE -- DO NOT EDIT BY HAND.
 //
 {impulse_comment}
 //
-// CrossPoint drives this panel with two levels only -- the canvas is quantised to
-// black and white before any LUT is indexed -- so every transition it can ask for
-// is +/- L[15] frames. Two families of LUT come out of that.
+// kFastLut, for the differential modes (epd_fast / epd_fastest), is the vendor DU
+// table plus the two grey columns the reader's anti-aliasing needs. The DU part is
+// verbatim: `L[15]` frames pushing level 0 toward black and level 15 toward white,
+// then a terminating all-zero frame.
 //
-// kDuLut, for the differential modes (epd_fast / epd_fastest), is the vendor DU
-// table verbatim: `L[15]` identical frames pushing level 0 toward black and level
-// 15 toward white, then a terminating all-zero frame. Levels 1..14 stay no-ops,
-// matching the vendor tables, which leave every destination other than the two
-// rails undriven.
+// The grey part is the same impulse vector read at two more levels. A grey
+// destination is driven toward white for `L[level]` frames and then parked on
+// a no-op, which lands it on that level *provided it started at black*. That
+// proviso is the whole design: the reader always pushes the B/W base first, and
+// that base paints every partially covered glyph pixel solid black, so by the time
+// the grey push runs the fringe is at a known rail. A LovyanGFX LUT column is
+// indexed by destination alone and cannot see where a pixel came from, so a
+// from-black nudge is the only correct shape available here.
+//
+// Both live in one bank deliberately. Panel_EPD folds the LUT bank offset into its
+// per-pixel progress value, so pushing the base and the greys under different
+// epd_modes makes every pixel compare unequal and re-drives the whole screen.
+//
+// Which levels carry the greys is decided per temperature range, because the
+// vendor vector is not evenly spaced and its spacing moves with temperature: at
+// 33..38 C levels 12 through 15 are all the same optical white, so a level that
+// reads as a good light grey when cold is no grey at all when warm. The board
+// config reads kGrayLevelDark/kGrayLevelLight for the range it selected the LUT
+// for and writes the matching canvas bytes, so the two always agree.
+//
+{gray_comment}
 //
 // kCleanLut, for epd_text / epd_quality, is the clean refresh. Those modes re-drive
 // every non-white pixel whether or not it changed, so this LUT has to be charge
@@ -227,12 +305,20 @@ const TempRange kTempRanges[kTempRangeCount] = {{
 {ranges}
 }};
 
-const uint32_t* const kDuLut[kTempRangeCount] = {{
-{du_ptrs}
+// The canvas levels the AA grey columns are cut for, per temperature range. A
+// board config turns these into the grey bytes its canvas writes; they are not
+// independently tunable -- retarget them in tools/gen_ed047tc2_waveform.py and
+// regenerate, or the canvas will address a column the LUT does not drive.
+const uint8_t kGrayLevelDark[kTempRangeCount] = {{{gray_dark_levels}}};
+
+const uint8_t kGrayLevelLight[kTempRangeCount] = {{{gray_light_levels}}};
+
+const uint32_t* const kFastLut[kTempRangeCount] = {{
+{fast_ptrs}
 }};
 
-const size_t kDuLutStep[kTempRangeCount] = {{
-{du_steps}
+const size_t kFastLutStep[kTempRangeCount] = {{
+{fast_steps}
 }};
 
 const uint32_t* const kCleanLut[kTempRangeCount] = {{
@@ -273,12 +359,53 @@ def main():
         for r in ranges
     )
 
-    body = HEADER.format(impulse_comment=impulse_comment)
-    for drive in sorted(set(drives)):
-        body += "// Differential update, %d drive frames.\n" % drive
-        body += "constexpr uint32_t kDu%d[] = {\n" % drive
-        body += (DU_ROW + "\n") * drive
+    # Grey levels are chosen per range, so the epd_fast bank is keyed on the two
+    # levels and the three frame counts that cut its columns. Ranges that agree on
+    # all five share one table.
+    grays = {r: pick_gray_levels(impulses[r]) for r in ranges}
+    bank_keys = [
+        (
+            impulses[r][15],
+            grays[r][0],
+            impulses[r][grays[r][0]],
+            grays[r][1],
+            impulses[r][grays[r][1]],
+        )
+        for r in ranges
+    ]
+    bank_name = {k: "kFast%d_%dat%d_%dat%d" % k for k in bank_keys}
+
+    gray_comment = "\n".join(
+        "//   {:>2}..{:<2} C  dark  = level {:>2} at {:>2} frames ({:>3.0f}% to white)"
+        "   light = level {:>2} at {:>2} frames ({:>3.0f}% to white)".format(
+            intervals[r][0],
+            intervals[r][1],
+            grays[r][0],
+            impulses[r][grays[r][0]],
+            100.0 * impulses[r][grays[r][0]] / impulses[r][15],
+            grays[r][1],
+            impulses[r][grays[r][1]],
+            100.0 * impulses[r][grays[r][1]] / impulses[r][15],
+        )
+        for r in ranges
+    )
+
+    body = HEADER.format(impulse_comment=impulse_comment, gray_comment=gray_comment)
+
+    for key in dict.fromkeys(bank_keys):
+        drive, dark, l_dark, light, l_light = key
+        body += (
+            "// Differential update + AA grey nudge, %d drive frames.\n"
+            "// Level %d parks after %d frames, level %d after %d.\n"
+            % (drive, dark, l_dark, light, l_light)
+        )
+        body += "constexpr uint32_t %s[] = {\n" % bank_name[key]
+        body += "".join(
+            fast_row(f, l_dark, l_light, dark, light) + "\n" for f in range(drive)
+        )
         body += "    0u,\n};\n\n"
+
+    for drive in dict.fromkeys(drives):
         body += "// Clean refresh, %d frames away from the target then %d back.\n" % (drive, drive)
         body += "constexpr uint32_t kClean%d[] = {\n" % drive
         body += (CLEAN_AWAY_ROW + "\n") * drive
@@ -289,9 +416,12 @@ def main():
         ranges="\n".join(
             "    {%d, %d}," % (intervals[r][0], intervals[r][1]) for r in ranges
         ),
-        du_ptrs="\n".join("    kDu%d," % d for d in drives),
-        du_steps="\n".join(
-            "    sizeof(kDu%d) / sizeof(kDu%d[0])," % (d, d) for d in drives
+        gray_dark_levels=", ".join(str(grays[r][0]) for r in ranges),
+        gray_light_levels=", ".join(str(grays[r][1]) for r in ranges),
+        fast_ptrs="\n".join("    %s," % bank_name[k] for k in bank_keys),
+        fast_steps="\n".join(
+            "    sizeof(%s) / sizeof(%s[0])," % (bank_name[k], bank_name[k])
+            for k in bank_keys
         ),
         clean_ptrs="\n".join("    kClean%d," % d for d in drives),
         clean_steps="\n".join(
@@ -307,7 +437,8 @@ def main():
     out.write_text(body, encoding="utf-8")
     print("wrote", out)
     for r, d in zip(ranges, drives):
-        print("  range %2d  %2d..%-2d C  drive=%2d frames" % (r, intervals[r][0], intervals[r][1], d))
+        print("  range %2d  %2d..%-2d C  drive=%2d frames  greys=level %d/%d"
+              % (r, intervals[r][0], intervals[r][1], d, grays[r][0], grays[r][1]))
 
 
 if __name__ == "__main__":
