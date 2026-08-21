@@ -1162,13 +1162,16 @@ constexpr BoardProfile LILYGO_T5S3 = {
     2.0f,
     PIN_UNASSIGNED,
     LILYGO_T5_PRO_GT911,  // GT911 touch (SDA39 SCL40 INT3 RST9, 0x5D, portrait sensor -> landscape panel)
-    // Frontlight: PT4103 boost EN behind GPIO11, PWM 5 kHz. 13-bit duty (the
-    // most LEDC gives at 5 kHz) so the perceptual curve has real steps at the
-    // dim end -- at 8 bits the whole 1..9% band collapsed into five LSBs.
-    // Floors measured off 1.5.17/1.5.18 behaviour: ~5% duty (10 us on-time)
-    // lit, ~2.2% (4.4 us) did not, so ignition is floored at 5% and hold at
-    // 2.5% pending an on-device tune of both numbers.
-    {11, 5000, 13, true, PIN_UNASSIGNED, false, 50, 25},
+    // Frontlight: PT4103 boost EN behind GPIO11, PWM 5 kHz. 12-bit duty so the
+    // perceptual curve has real steps at the dim end (at 8 bits the whole
+    // 1..9% band collapsed into five LSBs) -- and NOT 13: the Arduino-3 LEDC
+    // path auto-picks its clock, and 5 kHz x 2^13 = 40.96 MHz overruns the
+    // 40 MHz XTAL source, failing the attach and leaving the light COMPLETELY
+    // dead (no toggle, no slider). 12 bits (20.48 MHz) fits every source the
+    // selector can choose. Floors measured off 1.5.17/1.5.18 behaviour: ~5%
+    // duty (10 us on-time) lit, ~2.2% (4.4 us) did not, so ignition floors at
+    // 5% and hold at 2.5%, both permille so they track any resolution.
+    {11, 5000, 12, true, PIN_UNASSIGNED, false, 50, 25},
     NO_AUDIO,
     NO_LEDS,
     NO_FLIP,
