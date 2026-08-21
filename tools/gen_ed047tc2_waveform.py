@@ -163,10 +163,15 @@ def check(tables, intervals):
     return impulses
 
 
-# Optical targets for the two AA greys, as a fraction of the way from black to
-# white. The 2-bit font quantises a glyph edge to 25-50% ink (its light grey) and
-# 50-75% ink (its dark grey), so the midpoints of those buckets are what the panel
-# should land on.
+# Optical targets for the two AA greys, as a fraction of the impulse it takes to
+# cross from black to white. The font buckets a glyph edge at 25-50% ink (its
+# light grey) and 50-75% ink (its dark grey); these are those buckets' midpoints,
+# so the panel reproduces the coverage the font quantiser measured.
+#
+# Do not reach for these to make text heavier or lighter -- that is what the
+# reader's stroke weight setting is for, and it works by remapping which bucket
+# gets which tone rather than by moving the tones themselves. Retune these only
+# against a grey that reads as the wrong *shade* next to its neighbours.
 GRAY_TARGET_DARK = 0.375
 GRAY_TARGET_LIGHT = 0.625
 
@@ -182,6 +187,11 @@ def pick_gray_levels(impulse):
     temperature -- at 33..38 C levels 12..15 are all the same optical white, so a
     level that reads as a good light grey when cold is no grey at all when warm.
     Choosing per range is what keeps both greys real across the whole table.
+
+    Runs of equal impulse make exact ties common (at 24..27 C levels 8 through 11
+    are one optical step), so separation breaks them: of two pairs that score the
+    same, the one whose greys are further apart is the one you can actually tell
+    apart on the panel.
     """
     white = impulse[15]
     frac = [impulse[lv] / white for lv in range(16)]
@@ -191,11 +201,13 @@ def pick_gray_levels(impulse):
         for light in range(dark + 1, 15):
             if frac[light] > GRAY_MAX_FRACTION:
                 continue
-            if frac[light] - frac[dark] < GRAY_MIN_SEPARATION:
+            sep = frac[light] - frac[dark]
+            if sep < GRAY_MIN_SEPARATION:
                 continue
             err = (frac[dark] - GRAY_TARGET_DARK) ** 2 + (frac[light] - GRAY_TARGET_LIGHT) ** 2
-            if best is None or err < best[0]:
-                best = (err, dark, light)
+            key = (round(err, 9), -sep)
+            if best is None or key < best[0]:
+                best = (key, dark, light)
     if best is None:
         raise SystemExit("no usable grey pair for impulse %s" % impulse)
     return best[1], best[2]
