@@ -223,7 +223,17 @@ void FrontlightManager::apply() {
     const uint32_t n = static_cast<uint32_t>(_brightnessLevel - 1u);
     totalDuty = 1u + (n * n * (full - 1u)) / (254u * 254u);
   } else if (!_useLevel) {
-    totalDuty = perceptualDuty(_brightness, full);
+    // Linear percent -> duty, NOT the perceptual gamma the table below carries.
+    // The gamma curve is one half of a pair: upstream retuned its brightness
+    // panel's percent scale to match it (and the table's own comment says it
+    // was cut for a 10-bit duty range). This fork carries neither -- its panel
+    // percentages were tuned against linear duty, and this board's duty is
+    // 8-bit driving a PT4103 boost EN, where the gamma'd low end (10% -> 6/255)
+    // sits at or under the boost's minimum usable on-time: the light reads as
+    // dead at every ordinary reading brightness. Re-land the curve only
+    // together with the app-side rescale, as one change.
+    totalDuty = (static_cast<uint32_t>(_brightness) * full + 50u) / 100u;
+    (void)perceptualDuty;  // kept for that re-landing
   }
   uint32_t warmDuty = 0;
   uint32_t coolDuty = totalDuty;
