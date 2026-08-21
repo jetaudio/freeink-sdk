@@ -201,12 +201,35 @@ void overlayCanvasGray() {
 // page refreshed with those modes flashed when its AA pass ran.
 lgfx::epd_mode::epd_mode_t g_lastBaseEpdMode = lgfx::epd_mode::epd_fast;
 
+// Wait out a refresh this driver just queued.
+//
+// waitDisplay() alone can return before the refresh has begun: Panel_EPD's
+// display() raises _display_busy, yields (vTaskDelay(1)), and only then posts
+// the job. The yield lets the panel task reach the top of its loop, where it
+// assigns _display_busy = remain unconditionally -- false on an idle panel --
+// clearing the flag the caller just raised, then blocking on a queue the job
+// has not reached. Between xQueueSend() returning and the task waking, the flag
+// reads false for a refresh that has not started, so a caller that trusts it
+// walks straight into the panel task's diff copy and tears it. Torn step state
+// is how a pixel ends up with a step index that never terminates, `remain`
+// never clears, and the next waitDisplay() blocks forever -- the reader frozen
+// with input still alive.
+//
+// Yielding first lets the panel task ingest the job and re-raise the flag; the
+// wait after it then means what it says. (1.5.16 shipped this, 1.5.17 reverted
+// it on a ghosting suspicion; the ghosting survived the revert, which clears
+// this guard of that charge.)
+void settleDisplay() {
+  vTaskDelay(pdMS_TO_TICKS(2));
+  g_dev.waitDisplay();
+}
+
 void pushCanvas(lgfx::epd_mode::epd_mode_t epdMode) {
   if (!g_canvas) return;
   g_dev.waitDisplay();
   g_dev.setEpdMode(epdMode);
   g_canvas->pushSprite(0, 0);  // commits to the panel; Panel_EPD runs the refresh
-  g_dev.waitDisplay();
+  settleDisplay();
 }
 
 // Push the canvas keeping its grey levels, then refresh through the differential
@@ -233,7 +256,7 @@ void pushCanvasGraded(lgfx::epd_mode::epd_mode_t refreshMode) {
   g_dev.setAutoDisplay(true);
   g_dev.setEpdMode(refreshMode);
   g_dev.display();  // covers the rect pushSprite accumulated
-  g_dev.waitDisplay();
+  settleDisplay();
 }
 
 }  // namespace
@@ -269,6 +292,42 @@ void LgfxEpdDriver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev,
   fillCanvasBW(fb);  // expand the 1-bpp frame into the gray canvas
   g_lastBaseEpdMode = epdModeFor(mode);
   pushCanvas(g_lastBaseEpdMode);
+  if (turnOff) g_dev.sleep();
+#else
+  (void)fb;
+  (void)mode;
+  (void)turnOff;
+#endif
+}
+
+// One render, one push: the whole page -- text and its anti-aliasing greys --
+// reaches the panel as a single waveform.
+//
+// The two-push flow this replaces (B/W base, then a grey overlay push) existed
+// to normalize fringe pixels to black before a from-black grey nudge, because a
+// destination-indexed LUT cannot see where a pixel came from. The fast bank's
+// grey columns are now self-normalizing (saturate at the white rail, then walk
+// down to the level), so the base pass has nothing left to do and the page has
+// no intermediate state to show: it arrives finished, or it has not arrived.
+//
+// The charge story rides on the same property. Under the old flow every fringe
+// pixel swung black-to-grey through two pushes on every page turn, with a net
+// drive imbalance each time; under one push, Panel_EPD's diff drives a pixel
+// only when its target changes, and every grey drive begins with a saturating
+// rail visit that erases accumulated bias.
+void LgfxEpdDriver::displayGrayFrame(EpdBus& bus, const uint8_t* fb, RefreshMode mode, bool turnOff) {
+  (void)bus;
+#if FREEINK_DRIVER_LGFX_EPD
+  if (!fb) return;
+  g_dev.waitDisplay();  // never write the canvas while a refresh may be in flight
+  fillCanvasBW(fb);
+  overlayCanvasGray();
+  // HALF/FULL map to the GC16-style clean bank, whose columns land every level
+  // exactly, so the periodic scrub page carries its greys too. FAST takes the
+  // differential bank. Either way the write itself must be graded -- a fast-mode
+  // write Bayer-dithers the greys to the rails before any LUT is consulted.
+  g_lastBaseEpdMode = epdModeFor(mode);
+  pushCanvasGraded(g_lastBaseEpdMode);
   if (turnOff) g_dev.sleep();
 #else
   (void)fb;

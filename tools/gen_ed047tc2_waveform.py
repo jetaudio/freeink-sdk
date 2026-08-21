@@ -34,17 +34,27 @@ temperature range: the drive length.  This script asserts all of that against th
 blob before emitting anything, so a different or corrupted input fails loudly
 rather than producing a plausible-looking wrong waveform.
 
-The emitted `epd_fast` bank is the DU table plus two grey columns.  DU itself only
-defines the two rails, but the impulse vector gives the cost of every other
-level, so a destination-indexed nudge for the AA greys drops straight out of it:
-level `g` reached from black costs `L[g]` frames of drive toward white.  That is
-only valid because the B/W base push leaves every AA fringe pixel at black before
-the grey push runs -- see ED047TC2Waveform.cpp for the full argument.
+The emitted banks turn that vector into a single-push architecture:
 
-Both greys live in the *same* bank as the B/W drive on purpose.  Panel_EPD stores
-the LUT bank offset inside its per-pixel progress value, so a base push and a grey
-push in different epd_modes make every pixel compare unequal and re-drive the whole
-screen.  One bank, two pushes, diff intact.
+epd_fast/epd_fastest get the DU rails plus two SELF-NORMALIZING grey columns.
+A LUT column is indexed by destination alone and cannot see where a pixel came
+from, so a column that must land on a mid level from an arbitrary source first
+saturates at a rail and then walks to its target: L[15] frames toward white
+(any source becomes white -- the rail clamps), then L[15]-L[g] frames toward
+black. One column, correct from every source state. This is what lets a page
+carry its greys in the same push as its text: no separate B/W base pass exists
+to pre-position the fringe, and none is needed.
+
+epd_text/epd_quality become a true GC16-style refresh: every one of the 16
+columns rail-normalizes (dark half to white, light half to black) and then
+walks to its exact level. Destination-indexed yet source-independent, it both
+scrubs residue and resets any accumulated DC bias, because the saturating rail
+visit erases a pixel's drive history.
+
+Panel_EPD keeps one uint8_t block index per bank (lut_2pixel is addressed as
+lindex >> 8), so the five banks together must stay within 255 rows. The
+generator asserts that for every temperature range.
+
 """
 
 import re
@@ -179,6 +189,11 @@ GRAY_TARGET_LIGHT = 0.625
 GRAY_MAX_FRACTION = 0.95
 GRAY_MIN_SEPARATION = 0.08
 
+# Panel_EPD's per-bank offsets are uint8_t block indices, so all five banks
+# (eraser + quality + text + fast + fastest) share a 255-row budget.
+LUT_ROW_BUDGET = 255
+ERASER_ROWS = 3  # LovyanGFX lut_eraser: 2 drive rows + terminator
+
 
 def pick_gray_levels(impulse):
     """Pick the (dark, light) canvas levels that best hit the targets in one range.
@@ -213,25 +228,63 @@ def pick_gray_levels(impulse):
     return best[1], best[2]
 
 
-def fast_row(frame, l_dark, l_light, dark, light):
-    """One frame of the epd_fast bank: the two B/W rails plus the grey nudges."""
-    codes = [3] * 16
-    codes[0] = 1  # headed for black: driven black for the whole bank
-    codes[15] = 2  # headed for white: driven white for the whole bank
-    # A grey destination is driven toward white for exactly L[level] frames and
-    # then parked. That lands it on `level` only if it started at black, which is
-    # what the B/W base push guarantees.
-    if frame < l_dark:
-        codes[dark] = 2
-    if frame < l_light:
-        codes[light] = 2
-    return "    LUT_MAKE(%s)," % ", ".join(str(c) for c in codes)
+def fast_rows(l15, dark, l_dark, light, l_light):
+    """The differential bank: DU rails plus two self-normalizing grey columns.
+
+    Rails run the vendor DU verbatim: L[15] frames of full drive, then park.
+    Each grey column saturates at the white rail for the same L[15] frames --
+    which erases whatever state the pixel arrived in, rail clamp doing the work
+    a source index would otherwise have to -- and then walks back down toward
+    black for L[15]-L[g] frames to land on its level. The walk-down phases park
+    the rails at no-op, so the bank is L[15] + max walk-down rows long.
+    """
+    back_dark, back_light = l15 - l_dark, l15 - l_light
+    rows = []
+    for f in range(l15 + max(back_dark, back_light)):
+        codes = [3] * 16
+        if f < l15:
+            codes[0] = 1
+            codes[15] = 2
+            codes[dark] = 2
+            codes[light] = 2
+        else:
+            if f - l15 < back_dark:
+                codes[dark] = 1
+            if f - l15 < back_light:
+                codes[light] = 1
+        rows.append("    LUT_MAKE(%s)," % ", ".join(str(c) for c in codes))
+    return rows
 
 
-# Away from the target: dark levels get driven white, light levels black.
-CLEAN_AWAY_ROW = "    LUT_MAKE(2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1),"
-# ...then back onto it, the same number of frames, so the net is zero.
-CLEAN_ONTO_ROW = "    LUT_MAKE(1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2),"
+def clean_rows(impulse):
+    """The GC16-style clean bank for epd_text / epd_quality.
+
+    Every column rail-normalizes and then walks to its exact level: the dark
+    half (destinations 0-7) drives to the white rail for L[15] frames and then
+    descends L[15]-L[i]; the light half drives to the black rail and ascends
+    L[i]. Destination-indexed yet correct from any source, because the rail
+    visit saturates -- and that same saturation resets accumulated DC bias,
+    which per-page differential updates cannot help but build up.
+
+    The old bank drove every level away and all the way back, which is only
+    correct for the two rails; any grey pushed through it landed on a rail.
+    That was invisible while greys travelled exclusively through the fast bank,
+    and wrong the moment a page carries its greys in its one and only push.
+    """
+    l15 = impulse[15]
+    rows = []
+    for _ in range(l15):
+        rows.append("    LUT_MAKE(%s)," % ", ".join("2" if i < 8 else "1" for i in range(16)))
+    for f in range(l15):
+        codes = []
+        for i in range(16):
+            if i < 8:
+                codes.append("1" if f < l15 - impulse[i] else "3")
+            else:
+                codes.append("2" if f < impulse[i] else "3")
+        rows.append("    LUT_MAKE(%s)," % ", ".join(codes))
+    return rows
+
 
 HEADER = '''// GENERATED FILE -- DO NOT EDIT BY HAND.
 //
@@ -251,46 +304,44 @@ HEADER = '''// GENERATED FILE -- DO NOT EDIT BY HAND.
 //
 {impulse_comment}
 //
-// kFastLut, for the differential modes (epd_fast / epd_fastest), is the vendor DU
-// table plus the two grey columns the reader's anti-aliasing needs. The DU part is
-// verbatim: `L[15]` frames pushing level 0 toward black and level 15 toward white,
-// then a terminating all-zero frame.
+// Both emitted banks are SELF-NORMALIZING: a LovyanGFX LUT column is indexed by
+// destination alone, so any column that must land on a mid level from an
+// arbitrary source first saturates at a rail -- the clamp erases the pixel\'s
+// history -- and then walks to its target. That is what lets a page carry its
+// anti-aliasing greys in the same push as its text, with no separate B/W base
+// pass to pre-position the fringe.
 //
-// The grey part is the same impulse vector read at two more levels. A grey
-// destination is driven toward white for `L[level]` frames and then parked on
-// a no-op, which lands it on that level *provided it started at black*. That
-// proviso is the whole design: the reader always pushes the B/W base first, and
-// that base paints every partially covered glyph pixel solid black, so by the time
-// the grey push runs the fringe is at a known rail. A LovyanGFX LUT column is
-// indexed by destination alone and cannot see where a pixel came from, so a
-// from-black nudge is the only correct shape available here.
+// kFastLut (epd_fast / epd_fastest): the vendor DU rails verbatim, plus a grey
+// column per AA tone that spends L[15] frames at the white rail and then
+// descends L[15]-L[g] frames to its level. Panel_EPD\'s per-pixel diff means a
+// pixel is only driven when its target changes, so a fringe pixel that stays
+// the same grey across a page turn is not driven at all -- which is also the
+// charge story: drives happen on content changes only, each one begins with a
+// saturating rail visit, and the rail visit resets whatever DC bias the pixel
+// had accumulated.
 //
-// Both live in one bank deliberately. Panel_EPD folds the LUT bank offset into its
-// per-pixel progress value, so pushing the base and the greys under different
-// epd_modes makes every pixel compare unequal and re-drives the whole screen.
+// kCleanLut (epd_text / epd_quality): a GC16-style refresh. Every one of the 16
+// columns rail-normalizes (dark half to white, light half to black) and then
+// walks to its exact level, so the periodic clean page both scrubs residue and
+// re-lands every grey precisely. The previous bank drove each level away and
+// symmetrically back, which is only a correct landing for the two rails; any
+// grey pushed through it ended on a rail.
 //
 // Which levels carry the greys is decided per temperature range, because the
 // vendor vector is not evenly spaced and its spacing moves with temperature: at
-// 33..38 C levels 12 through 15 are all the same optical white, so a level that
-// reads as a good light grey when cold is no grey at all when warm. The board
-// config reads kGrayLevelDark/kGrayLevelLight for the range it selected the LUT
-// for and writes the matching canvas bytes, so the two always agree.
+// 33..38 C levels 12 through 15 are all the same optical white. The board config
+// reads kGrayLevelDark/kGrayLevelLight for the range it selected the LUT for and
+// writes the matching canvas bytes, so the two cannot drift apart.
 //
 {gray_comment}
 //
-// kCleanLut, for epd_text / epd_quality, is the clean refresh. Those modes re-drive
-// every non-white pixel whether or not it changed, so this LUT has to be charge
-// neutral or a run of clean refreshes would pump a bias into the text. It spends
-// `L[15]` frames driving each level *away* from where it is headed and the same
-// number driving it back, which nets exactly zero and puts every re-driven pixel
-// through a full rail-to-rail excursion -- which is what shakes out the residue a
-// long run of differential updates leaves behind.
-//
 // Keeping the drive length matched to the panel temperature IS the temperature
-// compensation: e-ink particles move more slowly when cold, so a cold panel needs
-// a longer push for the same optical result. Driving a warm panel with a cold
-// waveform over-drives it and driving a cold panel with a warm one leaves the
-// image grey and ghosted.
+// compensation: e-ink particles move more slowly when cold, so a cold panel
+// needs a longer push for the same optical result.
+//
+// Panel_EPD addresses its expanded LUT with uint8_t block indices, so all five
+// banks together (eraser + quality + text + fast + fastest) must fit in 255
+// rows. Worst case here: {worst_rows} rows.
 
 #include <ED047TC2Waveform.h>
 
@@ -363,6 +414,7 @@ def main():
 
     ranges = list(range(FIRST_RANGE, FIRST_RANGE + RANGE_COUNT))
     drives = [impulses[r][15] for r in ranges]
+    grays = {r: pick_gray_levels(impulses[r]) for r in ranges}
 
     impulse_comment = "\n".join(
         "//   {:>2}..{:<2} C  L = [{}]".format(
@@ -370,59 +422,50 @@ def main():
         )
         for r in ranges
     )
-
-    # Grey levels are chosen per range, so the epd_fast bank is keyed on the two
-    # levels and the three frame counts that cut its columns. Ranges that agree on
-    # all five share one table.
-    grays = {r: pick_gray_levels(impulses[r]) for r in ranges}
-    bank_keys = [
-        (
-            impulses[r][15],
-            grays[r][0],
-            impulses[r][grays[r][0]],
-            grays[r][1],
-            impulses[r][grays[r][1]],
-        )
-        for r in ranges
-    ]
-    bank_name = {k: "kFast%d_%dat%d_%dat%d" % k for k in bank_keys}
-
     gray_comment = "\n".join(
-        "//   {:>2}..{:<2} C  dark  = level {:>2} at {:>2} frames ({:>3.0f}% to white)"
-        "   light = level {:>2} at {:>2} frames ({:>3.0f}% to white)".format(
+        "//   {:>2}..{:<2} C  dark  = level {:>2} ({:>3.0f}% to white)"
+        "   light = level {:>2} ({:>3.0f}% to white)".format(
             intervals[r][0],
             intervals[r][1],
             grays[r][0],
-            impulses[r][grays[r][0]],
             100.0 * impulses[r][grays[r][0]] / impulses[r][15],
             grays[r][1],
-            impulses[r][grays[r][1]],
             100.0 * impulses[r][grays[r][1]] / impulses[r][15],
         )
         for r in ranges
     )
 
-    body = HEADER.format(impulse_comment=impulse_comment, gray_comment=gray_comment)
+    # One bank pair per distinct (vector, grey pair); dedup by content.
+    fast_banks = {}   # rows-tuple -> name
+    clean_banks = {}
+    fast_of = {}
+    clean_of = {}
+    worst_rows = 0
+    for idx, r in enumerate(ranges):
+        L = impulses[r]
+        d, l = grays[r]
+        fr = tuple(fast_rows(L[15], d, L[d], l, L[l]))
+        cr = tuple(clean_rows(L))
+        fast_of[r] = fast_banks.setdefault(fr, "kFastR%d" % idx)
+        clean_of[r] = clean_banks.setdefault(cr, "kCleanR%d" % idx)
+        # +1 per bank for the terminator row Panel_EPD copies too.
+        total = ERASER_ROWS + 2 * (len(cr) + 1) + 2 * (len(fr) + 1)
+        worst_rows = max(worst_rows, total)
+        if total > LUT_ROW_BUDGET:
+            raise SystemExit(
+                "range %d: %d LUT rows exceeds Panel_EPD's %d-row budget"
+                % (r, total, LUT_ROW_BUDGET)
+            )
 
-    for key in dict.fromkeys(bank_keys):
-        drive, dark, l_dark, light, l_light = key
-        body += (
-            "// Differential update + AA grey nudge, %d drive frames.\n"
-            "// Level %d parks after %d frames, level %d after %d.\n"
-            % (drive, dark, l_dark, light, l_light)
-        )
-        body += "constexpr uint32_t %s[] = {\n" % bank_name[key]
-        body += "".join(
-            fast_row(f, l_dark, l_light, dark, light) + "\n" for f in range(drive)
-        )
-        body += "    0u,\n};\n\n"
-
-    for drive in dict.fromkeys(drives):
-        body += "// Clean refresh, %d frames away from the target then %d back.\n" % (drive, drive)
-        body += "constexpr uint32_t kClean%d[] = {\n" % drive
-        body += (CLEAN_AWAY_ROW + "\n") * drive
-        body += (CLEAN_ONTO_ROW + "\n") * drive
-        body += "    0u,\n};\n\n"
+    body = HEADER.format(
+        impulse_comment=impulse_comment, gray_comment=gray_comment, worst_rows=worst_rows
+    )
+    for rows, name in fast_banks.items():
+        body += "// Differential bank: DU rails + self-normalizing AA grey columns.\n"
+        body += "constexpr uint32_t %s[] = {\n%s\n    0u,\n};\n\n" % (name, "\n".join(rows))
+    for rows, name in clean_banks.items():
+        body += "// GC16-style clean: every level rail-normalizes, then lands exactly.\n"
+        body += "constexpr uint32_t %s[] = {\n%s\n    0u,\n};\n\n" % (name, "\n".join(rows))
 
     body += FOOTER.format(
         ranges="\n".join(
@@ -430,14 +473,13 @@ def main():
         ),
         gray_dark_levels=", ".join(str(grays[r][0]) for r in ranges),
         gray_light_levels=", ".join(str(grays[r][1]) for r in ranges),
-        fast_ptrs="\n".join("    %s," % bank_name[k] for k in bank_keys),
+        fast_ptrs="\n".join("    %s," % fast_of[r] for r in ranges),
         fast_steps="\n".join(
-            "    sizeof(%s) / sizeof(%s[0])," % (bank_name[k], bank_name[k])
-            for k in bank_keys
+            "    sizeof(%s) / sizeof(%s[0])," % (fast_of[r], fast_of[r]) for r in ranges
         ),
-        clean_ptrs="\n".join("    kClean%d," % d for d in drives),
+        clean_ptrs="\n".join("    %s," % clean_of[r] for r in ranges),
         clean_steps="\n".join(
-            "    sizeof(kClean%d) / sizeof(kClean%d[0])," % (d, d) for d in drives
+            "    sizeof(%s) / sizeof(%s[0])," % (clean_of[r], clean_of[r]) for r in ranges
         ),
         drive_frames=", ".join(str(d) for d in drives),
     )
@@ -448,9 +490,17 @@ def main():
     )
     out.write_text(body, encoding="utf-8")
     print("wrote", out)
-    for r, d in zip(ranges, drives):
-        print("  range %2d  %2d..%-2d C  drive=%2d frames  greys=level %d/%d"
-              % (r, intervals[r][0], intervals[r][1], d, grays[r][0], grays[r][1]))
+    for idx, r in enumerate(ranges):
+        L = impulses[r]
+        d, l = grays[r]
+        print(
+            "  range %2d  %2d..%-2d C  drive=%2d  fast=%s(%d rows)  clean=%s(%d rows)  greys=lvl %d/%d"
+            % (
+                r, intervals[r][0], intervals[r][1], L[15],
+                fast_of[r], len(fast_rows(L[15], d, L[d], l, L[l])),
+                clean_of[r], len(clean_rows(L)), d, l,
+            )
+        )
 
 
 if __name__ == "__main__":
