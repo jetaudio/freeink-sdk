@@ -188,42 +188,12 @@ void fillCanvasGray(const uint8_t* base) {
   }
 }
 
-// Wait for a refresh this driver just triggered to actually finish.
-//
-// waitDisplay() alone is not enough, because Panel_EPD::display() publishes the
-// job in two steps that a caller can slip between:
-//
-//   _display_busy = true;
-//   vTaskDelay(1);                 // yields
-//   xQueueSend(_update_queue_handle, ...);
-//
-// The yield lets the panel task reach the top of its own loop, where it assigns
-// _display_busy = remain unconditionally. With the panel idle that is false, so
-// it clears the flag the caller just set and then blocks on a queue the job has
-// not been posted to yet. From xQueueSend() returning until the task wakes and
-// sets the flag again, _display_busy reads false for a refresh that has not
-// begun -- and waitDisplay() returns instantly.
-//
-// Everything downstream then treats the panel as idle. Rewriting the canvas at
-// that point drives the panel toward a target that moves underneath it, which is
-// how a page came out with its previous contents still mixed in; worse, a pixel
-// left with a step count that never converges keeps `remain` true forever, so
-// _display_busy never clears and the *next* waitDisplay() blocks for good.
-//
-// Yielding first lets the panel task consume the queue and re-raise the flag, so
-// the wait below sees the refresh it is meant to be waiting for. This is a guard
-// against an ordering LovyanGFX owns, not something the panel needs.
-void settleDisplay() {
-  vTaskDelay(pdMS_TO_TICKS(2));
-  g_dev.waitDisplay();
-}
-
 void pushCanvas(lgfx::epd_mode::epd_mode_t epdMode) {
   if (!g_canvas) return;
   g_dev.waitDisplay();
   g_dev.setEpdMode(epdMode);
   g_canvas->pushSprite(0, 0);  // commits to the panel; Panel_EPD runs the refresh
-  settleDisplay();
+  g_dev.waitDisplay();
 }
 
 // Push the canvas keeping its grey levels, then refresh through the differential
@@ -250,7 +220,7 @@ void pushCanvasGraded() {
   g_dev.setAutoDisplay(true);
   g_dev.setEpdMode(lgfx::epd_mode::epd_fast);
   g_dev.display();  // covers the rect pushSprite accumulated
-  settleDisplay();
+  g_dev.waitDisplay();
 }
 
 }  // namespace
