@@ -259,29 +259,27 @@ def fast_rows(l15, dark, l_dark, light, l_light):
 def clean_rows(impulse):
     """The GC16-style clean bank for epd_text / epd_quality.
 
-    Every column rail-normalizes and then walks to its exact level: the dark
-    half (destinations 0-7) drives to the white rail for L[15] frames and then
-    descends L[15]-L[i]; the light half drives to the black rail and ascends
-    L[i]. Destination-indexed yet correct from any source, because the rail
-    visit saturates -- and that same saturation resets accumulated DC bias,
-    which per-page differential updates cannot help but build up.
+    Three phases, uniform across all 16 columns so the refresh reads as a
+    blink rather than as noise: every pixel drives to the black rail for L[15]
+    frames, then to the white rail for L[15], then walks down from white to its
+    exact level (L[15]-L[i] frames toward black). The double rail excursion is
+    the scrub -- it erases drive history and accumulated DC bias -- and the
+    final descent lands every level, greys included, precisely.
 
-    The old bank drove every level away and all the way back, which is only
-    correct for the two rails; any grey pushed through it landed on a rail.
-    That was invisible while greys travelled exclusively through the fast bank,
-    and wrong the moment a page carries its greys in its one and only push.
+    An earlier cut of this bank sent each pixel to the rail OPPOSITE its
+    destination and back, which scrubbed and landed just as well but showed the
+    old page fading THROUGH the new page inverted, both at once: on a real
+    device the cadence refresh read as a screenful of garbage before the text
+    resolved. Same physics, reordered for the eye watching it.
     """
     l15 = impulse[15]
     rows = []
     for _ in range(l15):
-        rows.append("    LUT_MAKE(%s)," % ", ".join("2" if i < 8 else "1" for i in range(16)))
+        rows.append("    LUT_MAKE(%s)," % ", ".join(["1"] * 16))
+    for _ in range(l15):
+        rows.append("    LUT_MAKE(%s)," % ", ".join(["2"] * 16))
     for f in range(l15):
-        codes = []
-        for i in range(16):
-            if i < 8:
-                codes.append("1" if f < l15 - impulse[i] else "3")
-            else:
-                codes.append("2" if f < impulse[i] else "3")
+        codes = ["1" if f < l15 - impulse[i] else "3" for i in range(16)]
         rows.append("    LUT_MAKE(%s)," % ", ".join(codes))
     return rows
 
