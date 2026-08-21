@@ -556,6 +556,17 @@ struct FrontlightConfig {
   // on. pwmFrequency still applies (PM1 PWM_FREQ register); resolution is the
   // PM1's fixed 12 bits.
   bool viaPm1Pwm = false;
+  // Boost-driver floors, in permille of full duty. Zero on boards whose LED
+  // hangs directly off the PWM pin. On a board that PWMs a boost converter's
+  // EN pin (LilyGo T5 S3: PT4103 behind GPIO11), an on-time shorter than the
+  // boost's start-up produces NO light rather than dim light, so a perceptual
+  // dimming curve must land its bottom on the boost's floor, not on one LSB.
+  //   minStartPermille: lowest duty the boost reliably IGNITES from cold.
+  //   minHoldPermille:  lowest duty it stays lit at once running (<= start;
+  //                     FrontlightManager bridges the gap with a brief kick at
+  //                     start level when turning on into the hold band).
+  uint16_t minStartPermille = 0;
+  uint16_t minHoldPermille = 0;
 };
 
 // Audio output description (AudioOutput::None disables it).
@@ -1151,7 +1162,13 @@ constexpr BoardProfile LILYGO_T5S3 = {
     2.0f,
     PIN_UNASSIGNED,
     LILYGO_T5_PRO_GT911,  // GT911 touch (SDA39 SCL40 INT3 RST9, 0x5D, portrait sensor -> landscape panel)
-    {11, 5000, 8, true},  // backlight: BL_EN GPIO11, PWM 5 kHz / 8-bit, active-high
+    // Frontlight: PT4103 boost EN behind GPIO11, PWM 5 kHz. 13-bit duty (the
+    // most LEDC gives at 5 kHz) so the perceptual curve has real steps at the
+    // dim end -- at 8 bits the whole 1..9% band collapsed into five LSBs.
+    // Floors measured off 1.5.17/1.5.18 behaviour: ~5% duty (10 us on-time)
+    // lit, ~2.2% (4.4 us) did not, so ignition is floored at 5% and hold at
+    // 2.5% pending an on-device tune of both numbers.
+    {11, 5000, 13, true, PIN_UNASSIGNED, false, 50, 25},
     NO_AUDIO,
     NO_LEDS,
     NO_FLIP,
