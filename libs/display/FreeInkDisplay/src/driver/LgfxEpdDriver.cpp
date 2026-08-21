@@ -128,17 +128,6 @@ uint16_t g_w = 0, g_h = 0, g_wb = 0;
 constexpr uint8_t kGrayBlack = 0x00, kGrayWhite = 0xFF;
 uint8_t g_grayDark = 0, g_grayLight = 0;
 
-// (base, lsb, msb) per pixel -> 4 gray levels, matching the reference port: a set
-// base bit is white; otherwise msb/lsb pick light/dark; clear is black.
-inline uint8_t grayValue(uint8_t base, uint8_t lsb, uint8_t msb, uint8_t mask) {
-  if (base & mask) return kGrayWhite;
-  const bool l = lsb & mask, m = msb & mask;
-  if (m && l) return g_grayDark;
-  if (m) return g_grayLight;
-  if (l) return g_grayDark;
-  return kGrayBlack;
-}
-
 void allocCanvas(uint16_t w, uint16_t h) {
   g_w = w;
   g_h = h;
@@ -169,24 +158,48 @@ void fillCanvasBW(const uint8_t* fb) {
   }
 }
 
-// Combine the B/W base + buffered LSB/MSB planes into the 8-bit gray canvas.
-void fillCanvasGray(const uint8_t* base) {
+// Overlay the buffered LSB/MSB planes onto the B/W canvas the base push left
+// behind, darkening only the pixels a plane actually selects.
+//
+// This used to take the base frame as an argument and rebuild every pixel from
+// it. That looked reasonable but could not work: displayGray() is handed
+// FreeInkDisplay::frameBuffer, and the host's plane dance (clear to 0x00, render
+// text-only, copy the plane out, call displayGray) leaves the LAST PLANE there,
+// not the page. Ssd1677Driver::displayGray() opens with `(void)fb` -- its planes
+// are already in controller RAM and the panel retains the B/W image -- so nothing
+// ever noticed that the buffer held a plane. Here it painted the whole background
+// black and left only the anti-aliased marks standing.
+//
+// The canvas already holds the B/W frame from the base push and is not cleared by
+// pushSprite(), so it IS the base. Reading it instead of a caller-supplied pointer
+// removes the ambiguity rather than relying on the caller to resolve it.
+void overlayCanvasGray() {
   if (!g_canvas || !g_lsb || !g_msb) return;
   auto* dst = static_cast<uint8_t*>(g_canvas->getBuffer());
   if (!dst) return;
   for (uint16_t y = 0; y < g_h; ++y) {
-    const uint8_t* brow = base + static_cast<uint32_t>(y) * g_wb;
     const uint8_t* lrow = g_lsb + static_cast<uint32_t>(y) * g_wb;
     const uint8_t* mrow = g_msb + static_cast<uint32_t>(y) * g_wb;
     uint8_t* drow = dst + static_cast<uint32_t>(y) * g_w;
     for (uint16_t bx = 0; bx < g_wb; ++bx) {
+      const uint8_t l = lrow[bx], m = mrow[bx];
+      if ((l | m) == 0) continue;  // no selector bits in this byte — leave the B/W run alone
       for (uint8_t bit = 0; bit < 8; ++bit) {
         const uint8_t mask = 0x80 >> bit;
-        drow[bx * 8 + bit] = grayValue(brow[bx], lrow[bx], mrow[bx], mask);
+        const bool lb = (l & mask) != 0, mb = (m & mask) != 0;
+        if (!lb && !mb) continue;
+        drow[bx * 8 + bit] = (mb && !lb) ? g_grayLight : g_grayDark;
       }
     }
   }
 }
+
+// The epd_mode of the last base push. Panel_EPD's per-pixel diff keys on the
+// epd_mode LUT offset, so the grayscale overlay must be pushed with the SAME mode
+// the base used or every pixel is re-driven (a full-screen flash). displayGray()
+// used to hardcode epd_fast while display() maps HALF/FULL to epd_text, so any
+// page refreshed with those modes flashed when its AA pass ran.
+lgfx::epd_mode::epd_mode_t g_lastBaseEpdMode = lgfx::epd_mode::epd_fast;
 
 void pushCanvas(lgfx::epd_mode::epd_mode_t epdMode) {
   if (!g_canvas) return;
@@ -211,14 +224,14 @@ void pushCanvas(lgfx::epd_mode::epd_mode_t epdMode) {
 // pixels land (16 levels, no dither), fast when the refresh goes out (no eraser,
 // and the same LUT bank the B/W base used, so Panel_EPD's per-pixel diff still
 // skips everything that did not change).
-void pushCanvasGraded() {
+void pushCanvasGraded(lgfx::epd_mode::epd_mode_t refreshMode) {
   if (!g_canvas) return;
   g_dev.waitDisplay();
   g_dev.setEpdMode(lgfx::epd_mode::epd_quality);
   g_dev.setAutoDisplay(false);
   g_canvas->pushSprite(0, 0);  // writes the panel buffer, queues no refresh
   g_dev.setAutoDisplay(true);
-  g_dev.setEpdMode(lgfx::epd_mode::epd_fast);
+  g_dev.setEpdMode(refreshMode);
   g_dev.display();  // covers the rect pushSprite accumulated
   g_dev.waitDisplay();
 }
@@ -253,8 +266,9 @@ void LgfxEpdDriver::display(EpdBus& bus, const uint8_t* fb, const uint8_t* prev,
   (void)bus;
   (void)prev;
 #if FREEINK_DRIVER_LGFX_EPD
-  fillCanvasBW(fb);          // expand the 1-bpp frame into the gray canvas
-  pushCanvas(epdModeFor(mode));
+  fillCanvasBW(fb);  // expand the 1-bpp frame into the gray canvas
+  g_lastBaseEpdMode = epdModeFor(mode);
+  pushCanvas(g_lastBaseEpdMode);
   if (turnOff) g_dev.sleep();
 #else
   (void)fb;
@@ -303,11 +317,21 @@ void LgfxEpdDriver::displayGray(EpdBus& bus, const uint8_t* fb, bool turnOff, co
   (void)lut;
   (void)factoryMode;
 #if FREEINK_DRIVER_LGFX_EPD
-  fillCanvasGray(fb);  // combine base + LSB/MSB planes -> 4-level gray
+  (void)fb;             // the canvas from the base push IS the base; see overlayCanvasGray()
+  overlayCanvasGray();  // darken only the pixels the planes select
+  // Refresh under the mode the base push used. Panel_EPD's per-pixel diff keys
+  // on the epd_mode LUT offset, so switching modes here re-drives every pixel --
+  // a full-screen flash on any page the host refreshed with HALF or FULL.
+  //
+  // The pixel write is a separate question from the refresh, and on a board
+  // whose fast bank carries grey columns it must not go out under a fast mode:
+  // _draw_pixels() Bayer-dithers to the two rails there, which is what turned
+  // the greys into black speckle. pushCanvasGraded() writes under a graded mode
+  // and refreshes under this one.
   if (_cfg.grayNudgeInFastBank) {
-    pushCanvasGraded();
+    pushCanvasGraded(g_lastBaseEpdMode);
   } else {
-    pushCanvas(lgfx::epd_mode::epd_fast);
+    pushCanvas(g_lastBaseEpdMode);
   }
   if (turnOff) g_dev.sleep();
 #else
