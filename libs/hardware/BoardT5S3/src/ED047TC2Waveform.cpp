@@ -65,7 +65,7 @@
 //
 // Panel_EPD addresses its expanded LUT with uint8_t block indices, so all five
 // banks together (eraser + quality + text + fast + fastest) must fit in 255
-// rows. Worst case here: 229 rows.
+// rows. Worst case here: 118 rows.
 
 #include <ED047TC2Waveform.h>
 

@@ -193,6 +193,13 @@ GRAY_MIN_SEPARATION = 0.08
 # (eraser + quality + text + fast + fastest) share a 255-row budget.
 LUT_ROW_BUDGET = 255
 ERASER_ROWS = 3  # LovyanGFX lut_eraser: 2 drive rows + terminator
+UNUSED_SLOT_ROWS = 1  # the board config stubs epd_quality/epd_fastest (see there)
+
+# The binding constraint is NOT the 255-row table: Panel_EPD stores per-pixel
+# progress in uint16_t and flags fast modes with +0x8000, so a fast bank's
+# STARTING block must be <= 127. Slot order is eraser, quality, text, fast,
+# fastest; with quality stubbed the fast start is eraser + stub + clean.
+FAST_START_BUDGET = 127
 
 
 def pick_gray_levels(impulse):
@@ -446,13 +453,21 @@ def main():
         cr = tuple(clean_rows(L))
         fast_of[r] = fast_banks.setdefault(fr, "kFastR%d" % idx)
         clean_of[r] = clean_banks.setdefault(cr, "kCleanR%d" % idx)
-        # +1 per bank for the terminator row Panel_EPD copies too.
-        total = ERASER_ROWS + 2 * (len(cr) + 1) + 2 * (len(fr) + 1)
+        # +1 per bank for the terminator row Panel_EPD copies too. Quality and
+        # fastest are stubbed in the board config, so they cost one row each.
+        total = ERASER_ROWS + 2 * UNUSED_SLOT_ROWS + (len(cr) + 1) + (len(fr) + 1)
         worst_rows = max(worst_rows, total)
         if total > LUT_ROW_BUDGET:
             raise SystemExit(
                 "range %d: %d LUT rows exceeds Panel_EPD's %d-row budget"
                 % (r, total, LUT_ROW_BUDGET)
+            )
+        fast_start = ERASER_ROWS + UNUSED_SLOT_ROWS + (len(cr) + 1)
+        if fast_start > FAST_START_BUDGET:
+            raise SystemExit(
+                "range %d: fast bank starts at block %d > %d -- the 0x8000 fast"
+                " flag would overflow Panel_EPD's uint16 step words and blank"
+                " the display" % (r, fast_start, FAST_START_BUDGET)
             )
 
     body = HEADER.format(

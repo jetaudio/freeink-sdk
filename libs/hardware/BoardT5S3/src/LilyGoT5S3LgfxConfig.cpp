@@ -173,6 +173,22 @@ freeink::LgfxEpdConfig buildConfig() {
   int8_t measured = 0;
   const bool measuredOk = readPanelTemperature(&measured);
   const int tempC = measuredOk ? measured : kAssumedTemperatureC;
+  // Slots for modes this stack never refreshes with. CrossPoint maps FAST to
+  // epd_fast and HALF/FULL to epd_text; epd_quality is only ever a WRITE mode
+  // (graded pixel quantizer -- the write path reads no LUT) and epd_fastest is
+  // unused. Panel_EPD would fill an empty slot with LovyanGFX's stock tables,
+  // which both burns LUT blocks and is tuned for another panel; a one-row
+  // terminator keeps the slot valid and nearly free.
+  //
+  // The blocks matter more than they look: Panel_EPD stores per-pixel progress
+  // in uint16_t words and flags the fast modes with +0x8000, so the fast and
+  // fastest banks must START at block <= 127 -- half the space the uint8_t
+  // offset table suggests. The three-phase clean bank blew exactly this at
+  // cool temperature ranges (fast start at block 131), which killed every
+  // refresh the firmware makes and blanked the display below ~27 C while
+  // warmer boots worked. Stubbing the two dead slots puts the fast start near
+  // block 70 with room to grow.
+  static constexpr uint32_t kUnusedLut[] = {0u};
   const size_t range = freeink::ed047tc2::tempRangeIndex(tempC);
   const uint32_t* fast = freeink::ed047tc2::kFastLut[range];
   const size_t fastStep = freeink::ed047tc2::kFastLutStep[range];
@@ -212,14 +228,14 @@ freeink::LgfxEpdConfig buildConfig() {
       8,
       0,
       {&prepareEpdPower, &epdPowerOn, &epdPowerOff},
-      clean,      // lutQuality
+      kUnusedLut,  // lutQuality — write-only mode here; never refreshed with
+      1,
+      clean,  // lutText   — Full/Half refreshes (the GC16-style blink)
       cleanStep,
-      clean,      // lutText   — Full/Half refreshes
-      cleanStep,
-      fast,       // lutFast   — page turns and the AA overlay push
+      fast,  // lutFast   — page turns and the single-push AA
       fastStep,
-      fast,       // lutFastest
-      fastStep,
+      kUnusedLut,  // lutFastest — unused by this stack
+      1,
       grayDark,
       grayLight,
       true,  // grey columns live in the fast bank above
