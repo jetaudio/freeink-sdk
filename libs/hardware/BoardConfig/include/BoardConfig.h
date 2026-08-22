@@ -1162,16 +1162,31 @@ constexpr BoardProfile LILYGO_T5S3 = {
     2.0f,
     PIN_UNASSIGNED,
     LILYGO_T5_PRO_GT911,  // GT911 touch (SDA39 SCL40 INT3 RST9, 0x5D, portrait sensor -> landscape panel)
-    // Frontlight: PT4103 boost EN behind GPIO11, PWM 5 kHz. 12-bit duty so the
+    // Frontlight: PT4103 boost EN behind GPIO11, PWM 1 kHz. 12-bit duty so the
     // perceptual curve has real steps at the dim end (at 8 bits the whole
-    // 1..9% band collapsed into five LSBs) -- and NOT 13: the Arduino-3 LEDC
-    // path auto-picks its clock, and 5 kHz x 2^13 = 40.96 MHz overruns the
-    // 40 MHz XTAL source, failing the attach and leaving the light COMPLETELY
-    // dead (no toggle, no slider). 12 bits (20.48 MHz) fits every source the
-    // selector can choose. Floors measured off 1.5.17/1.5.18 behaviour: ~5%
-    // duty (10 us on-time) lit, ~2.2% (4.4 us) did not, so ignition floors at
-    // 5% and hold at 2.5%, both permille so they track any resolution.
-    {11, 5000, 12, true, PIN_UNASSIGNED, false, 50, 25},
+    // 1..9% band collapsed into five LSBs) -- and NOT 13 at the old 5 kHz: the
+    // Arduino-3 LEDC path auto-picks its clock, and 5 kHz x 2^13 = 40.96 MHz
+    // overran the 40 MHz XTAL source, failing the attach and leaving the light
+    // COMPLETELY dead (no toggle, no slider). 1 kHz x 2^12 = 4.1 MHz clears
+    // every source the selector can choose by a wide margin.
+    //
+    // What the boost needs is a minimum ON-TIME, not a minimum duty: ~10 us lit
+    // and ~4.4 us did not, measured off 1.5.17/1.5.18. Those microseconds are
+    // what the floors below encode, so the PWM period is the lever on how dim
+    // the light can go. At 5 kHz (200 us period) the 5 us hold floor was 25
+    // permille -- 2.5% duty, already ~18% of perceived full brightness, so 1%
+    // came up too bright and 1% -> 2% moved the duty by 4% (0.2 us), under the
+    // threshold where the boost's output changes at all. At 1 kHz (1000 us
+    // period) the SAME on-times are 10 and 5 permille: 1% lands at 0.5% duty,
+    // five times dimmer, and each LSB is 244 ns instead of 49 ns so 1% -> 2%
+    // is a 19% duty step. Nothing here asks the converter for a pulse shorter
+    // than one already shown to light it.
+    //
+    // 1 kHz is the floor for the frequency itself: IEEE 1789's low-risk flicker
+    // limit is depth < 8% x f_Hz, and these near-floor pulses are ~100% depth.
+    // Going below 1 kHz to chase more dimming range would trade a real
+    // photobiological margin for it.
+    {11, 1000, 12, true, PIN_UNASSIGNED, false, 10, 5},
     NO_AUDIO,
     NO_LEDS,
     NO_FLIP,
