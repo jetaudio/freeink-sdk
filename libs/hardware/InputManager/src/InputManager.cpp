@@ -475,16 +475,32 @@ void InputManager::update() {
 
   const uint8_t state = getState();
 
-  // Debounce
+  // Debounce, asymmetrically: a press commits once the line has been quiet for
+  // DEBOUNCE_DELAY, a release has to stay quiet for RELEASE_SETTLE_DELAY.
+  //
+  // A 5 ms window is only as good as the polling that feeds it, and this loop
+  // samples tens of milliseconds apart -- longer still when it idles in light
+  // sleep between page turns. A switch that chatters in bursts therefore clears
+  // the window with every burst: measured on a key soldered to a T5 S3 Pro Lite
+  // pad, 60+ crossings over 14 s in bursts ~100 ms apart, which is a fresh page
+  // turn each time. Waiting only on the release side collapses each burst back
+  // into the one press it was, and costs nothing anyone can feel: 25 ms is an
+  // order of magnitude under the long-press threshold, and the edge a tap acts
+  // on is the release, not the press.
   if (state != lastState) {
     lastDebounceTime = currentTime;
     lastState = state;
   }
+  if (state == currentState) {
+    return;
+  }
 
-  if ((currentTime - lastDebounceTime) > DEBOUNCE_DELAY) {
-    if (state != currentState) {
-      applyStateChange(state, currentTime);
-    }
+  // Any bit going up makes it a release; a sample that both presses and
+  // releases (two keys crossing in one poll) takes the cautious window.
+  const uint8_t releasing = static_cast<uint8_t>(currentState & ~state);
+  const unsigned long settle = releasing != 0 ? RELEASE_SETTLE_DELAY : DEBOUNCE_DELAY;
+  if ((currentTime - lastDebounceTime) > settle) {
+    applyStateChange(state, currentTime);
   }
 }
 

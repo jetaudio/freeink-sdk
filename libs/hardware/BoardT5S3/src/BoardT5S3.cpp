@@ -1,11 +1,11 @@
 #include <BoardT5S3.h>
-
 #include <InputManager.h>
 #include <SPI.h>
 #include <Wire.h>
-#include <cassert>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+
+#include <cassert>
 
 namespace BoardT5S3 {
 namespace {
@@ -91,23 +91,34 @@ void beginI2C() {
 }
 
 void prepareSdBus() {
+#if T5S3_HAS_LORA_GPS
+  // Deselect the radio before the SD card shares the bus with it.
   pinMode(T5S3_LORA_CS, OUTPUT);
   digitalWrite(T5S3_LORA_CS, HIGH);
+#endif
   pinMode(T5S3_SD_CS, OUTPUT);
   digitalWrite(T5S3_SD_CS, HIGH);
   SPI.begin(T5S3_SPI_SCLK, T5S3_SPI_MISO, T5S3_SPI_MOSI, T5S3_SD_CS);
 }
 
+// Cuts power to the LoRa/GPS module and parks the pins it would drive. On a
+// Pro Lite there is no module to cut power to, and its four pins are keys:
+// InputManager has already pulled them up and is polling them, so touching
+// them here would be taking them back off the user.
 void disableGpsLora() {
+#if T5S3_HAS_LORA_GPS
   pinMode(T5S3_LORA_CS, OUTPUT);
   digitalWrite(T5S3_LORA_CS, HIGH);
   pinMode(T5S3_LORA_RST, OUTPUT);
   digitalWrite(T5S3_LORA_RST, LOW);
   pinMode(T5S3_LORA_IRQ, INPUT);
   pinMode(T5S3_LORA_BUSY, INPUT);
+#endif
   pinMode(T5S3_GPS_RXD, INPUT);
   pinMode(T5S3_GPS_TXD, INPUT);
 
+  // Left low on both builds: the rail feeds an absent module on the Lite, and
+  // the enable line is the one pin the radio does not share with anything.
   writePca9535Pin(PCA9535_IO00_LORA_GPS_EN, false);
   setPca9535PinMode(PCA9535_IO00_LORA_GPS_EN, OUTPUT);
 }

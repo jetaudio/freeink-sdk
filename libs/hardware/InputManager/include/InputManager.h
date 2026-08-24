@@ -407,6 +407,8 @@ class InputManager {
 
   static constexpr int ADC_NO_BUTTON = 3900;
   static constexpr unsigned long DEBOUNCE_DELAY = 5;
+  // Releases settle longer than presses -- see the debounce in update().
+  static constexpr unsigned long RELEASE_SETTLE_DELAY = 25;
   static constexpr unsigned long CONFIRM_BACK_HOLD_MS = 650;
   static constexpr unsigned long CONFIRM_POWER_HOLD_MS = 400;
   static constexpr unsigned long TWO_BUTTON_HOLD_MS = 650;

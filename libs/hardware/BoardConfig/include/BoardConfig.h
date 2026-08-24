@@ -51,6 +51,13 @@
 #ifndef FREEINK_DEVICE_LILYGO
 #define FREEINK_DEVICE_LILYGO 0
 #endif
+
+// LilyGO T5 S3 4.7" Pro vs Pro Lite. The Lite has no LoRa/GPS module fitted,
+// which frees four pins for keys — see BoardT5S3Pins.h, which defaults this the
+// same way for the board-support code.
+#ifndef T5S3_HAS_LORA_GPS
+#define T5S3_HAS_LORA_GPS 0
+#endif
 #ifndef FREEINK_DEVICE_M5PAPER
 #define FREEINK_DEVICE_M5PAPER 0
 #endif
@@ -1152,11 +1159,24 @@ constexpr BoardProfile LILYGO_T5S3 = {
      PIN_UNASSIGNED},                            // no SPI display pins: parallel bus lives in LgfxEpdConfig
     0,                                           // displaySpiHz n/a (external bus)
     {14, 21, 13, 12, PIN_UNASSIGNED, false, 0},  // SD over SPI: SCLK14 MISO21 MOSI13 CS12
+#if T5S3_HAS_LORA_GPS
     {PIN_UNASSIGNED, PIN_UNASSIGNED, PIN_UNASSIGNED, PIN_UNASSIGNED, PIN_UNASSIGNED, PIN_UNASSIGNED, 0,
-     false},  // power=BOOT (GPIO0), active-low. Do NOT map IO48 as confirm: on the
-              // Pro Lite it reads spurious active-low pulses (phantom Confirm
-              // presses opened the reader menu by itself) — verify its wiring
-              // on real hardware before mapping it again.
+     false},  // power=BOOT (GPIO0), active-low; the radio owns every other free pin.
+#else
+    // Pro Lite: the four unpopulated LoRa pads are keys. back=GPIO47 (BUSY),
+    // left=GPIO1 (RST), right=GPIO46 (CS), up=GPIO10 (IRQ), power=BOOT (GPIO0),
+    // all active-low. DOWN is deliberately left free — the expander button
+    // (IO48) arrives on it from the board hook. So is CONFIRM, which carries the
+    // most special-casing in the firmware (long-press menu, the X4 Pro
+    // double-click window) and is the last slot that should acquire a key by
+    // accident; the same caution that already applied to IO48, which read
+    // spurious active-low pulses and opened the reader menu by itself.
+    //
+    // These are not page-turn buttons: the app masks all five and routes them
+    // through its configurable-key dispatcher, so what each one does is the
+    // user's choice rather than this mapping.
+    {47, PIN_UNASSIGNED, 1, 46, 10, PIN_UNASSIGNED, 0, false},
+#endif
     PIN_UNASSIGNED,  // batteryAdc: none — uses the I2C fuel gauge below
     PIN_UNASSIGNED,
     2.0f,
