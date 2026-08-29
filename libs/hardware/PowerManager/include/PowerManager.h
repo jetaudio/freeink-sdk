@@ -19,6 +19,34 @@ namespace freeink {
 
 class PowerManager {
  public:
+  // Ceiling on the release poll below. The poll used to be unbounded, and that
+  // is a far more expensive thing to get wrong than it looks: it runs AFTER the
+  // battery-log row is written and after every peripheral has been torn down, so
+  // a line that never reads released parks the device in a CPU-idle loop —
+  // roughly 25 mA, six times deep sleep — for as long as the condition lasts,
+  // and leaves nothing behind but a sleep gap the log cannot tell apart from a
+  // real sleep. Measured on a T5 S3: two such nights cost 240 mAh and 110 mAh.
+  static constexpr uint32_t RELEASE_WAIT_MAX_MS = 4000;
+  // How long the device parks on a timer once the line looks genuinely stuck.
+  static constexpr uint32_t STUCK_RETRY_SECONDS = 60;
+  // Timed-out waits before the button wake is swapped for that timer. ONE,
+  // deliberately: arming a level-triggered wake on a line that is still at the
+  // wake level wakes the chip the instant it sleeps, and the boot that follows
+  // sees the button genuinely held, so it is a full visible restart -- "the
+  // sleep screen came up and then it rebooted itself". Retrying that even twice
+  // before parking on the timer would ship exactly the symptom the bounded wait
+  // was added to prevent. There is no information in the second attempt that the
+  // first did not already have.
+  static constexpr uint8_t STUCK_STREAK_LIMIT = 1;
+
+  // Board-specific "park everything that draws" step, run as the last thing
+  // before the chip stops. Registered once at boot; called from deepSleep(), so
+  // no sleep path — not the reader's sleep gesture, not the idle timeout, not
+  // the two early returns in setup() that never reach display init — can skip
+  // it. Runs while I2C and the GPIO matrix are still alive.
+  using SleepParkHook = void (*)();
+  static void setSleepParkHook(SleepParkHook hook);
+
   // Arm wake-on-power-button using the SoC-correct wakeup source and the active
   // board's power pin + polarity (powerActiveHigh -> wake on HIGH, else LOW).
   // Returns false if the board has no power pin (PIN_UNASSIGNED); nothing armed.
@@ -31,8 +59,13 @@ class PowerManager {
   static void armWakeOnPins(uint64_t gpioMask, bool wakeLow = true);
 
   // Poll the power-button GPIO (raw read, with the matching pull) until released,
-  // so deep sleep isn't immediately cancelled by a still-held press.
-  static void waitForPowerButtonRelease();
+  // so deep sleep isn't immediately cancelled by a still-held press. Bounded by
+  // RELEASE_WAIT_MAX_MS. Returns the milliseconds spent waiting; the caller
+  // decides what a timeout means (see deepSleepUntilPowerButton()).
+  static uint32_t waitForPowerButtonRelease();
+
+  // True while the power line still reads asserted.
+  static bool powerButtonHeld();
 
   // Drive every assigned peripheral power-rail enable in the active board
   // profile (display / SD / touch / mic) to its OFF level and latch it with
@@ -68,6 +101,41 @@ class PowerManager {
 
   // Convenience: wait for release, arm the power-button wakeup, then deep sleep.
   [[noreturn]] static void deepSleepUntilPowerButton();
+
+  // --- sleep-entry telemetry --------------------------------------------------
+  // Kept in RTC_NOINIT, so it survives the sleep itself and the wake reset and
+  // can be read on the next boot — which is the only chance anything has to see
+  // it, since the card is unmounted and the console is down by the time the
+  // sleep path runs.
+  struct SleepReport {
+    uint32_t releaseWaitMs = 0;       // the last wait
+    uint32_t releaseWaitTotalMs = 0;  // cumulative since clearSleepCounters()
+    uint32_t timeouts = 0;            // waits that hit RELEASE_WAIT_MAX_MS
+    uint8_t stuckStreak = 0;          // consecutive timeouts, reset by a clean sleep
+    bool lastTimedOut = false;
+    bool sleptOnStuckTimer = false;  // the last sleep parked on the retry timer
+  };
+  static SleepReport sleepReport();
+  static void clearSleepCounters();
+
+  // Arm an additional timer wake on the NEXT deep sleep, then forget it.
+  //
+  // Exists because the deep-sleep path is otherwise untestable on a bench: the
+  // only way in is a real button, the only way out is a real button, and the
+  // USB console dies on the way down. With this, a serial command can drive the
+  // complete path -- park hook, release poll, pad isolation, the sleep itself --
+  // and the device comes back on its own with its RTC_NOINIT findings intact for
+  // the next boot to report. Zero disables.
+  // simulateHeld makes powerButtonHeld() answer true for that one sleep, which
+  // is the only way to reach the "line never released" branch without a wedged
+  // button: the poll reads a real pad, and a bench cannot hold one down. The
+  // timer wake is what makes reaching that branch survivable.
+  static void armDebugTimerWake(uint32_t seconds, bool simulateHeld = false);
+
+  // True when this boot is the retry timer firing after a stuck power line,
+  // rather than anything the user did. The consumer should go straight back to
+  // sleep instead of lighting the screen up in front of nobody.
+  static bool wokeFromStuckRetry();
 };
 
 }  // namespace freeink

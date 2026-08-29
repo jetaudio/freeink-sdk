@@ -9,7 +9,48 @@ namespace freeink {
 namespace {
 int8_t powerPin() { return BoardConfig::ACTIVE.input.power; }
 bool powerActiveHigh() { return BoardConfig::ACTIVE.input.powerActiveHigh; }
+
+PowerManager::SleepParkHook s_parkHook = nullptr;
+
+// Consumed by the next deep sleep; see armDebugTimerWake(). Plain RAM, so it
+// cannot survive a sleep and re-arm itself by accident.
+uint32_t s_debugTimerWakeSeconds = 0;
+bool s_debugSimulateHeld = false;
+
+// Sleep-entry telemetry. RTC_NOINIT rather than plain statics because every
+// interesting value here is produced on the way INTO sleep, after the SD card is
+// unmounted and the console is down — the next boot is the only reader it will
+// ever have.
+constexpr uint32_t PM_COUNTER_MAGIC = 0x50574D31u;  // 'PWM1'
+constexpr uint32_t FLAG_TIMED_OUT = 1u << 0;
+constexpr uint32_t FLAG_STUCK_TIMER = 1u << 1;
+
+RTC_NOINIT_ATTR uint32_t s_counterMagic;
+RTC_NOINIT_ATTR uint32_t s_releaseWaitMs;
+RTC_NOINIT_ATTR uint32_t s_releaseWaitTotalMs;
+RTC_NOINIT_ATTR uint32_t s_releaseTimeouts;
+RTC_NOINIT_ATTR uint32_t s_stuckStreak;
+RTC_NOINIT_ATTR uint32_t s_flags;
+
+// RTC_NOINIT is uninitialised on a cold boot, so nothing may be read before the
+// magic has been checked once.
+void ensureCounters() {
+  if (s_counterMagic == PM_COUNTER_MAGIC) return;
+  s_counterMagic = PM_COUNTER_MAGIC;
+  s_releaseWaitMs = 0;
+  s_releaseWaitTotalMs = 0;
+  s_releaseTimeouts = 0;
+  s_stuckStreak = 0;
+  s_flags = 0;
+}
 }  // namespace
+
+void PowerManager::setSleepParkHook(const SleepParkHook hook) { s_parkHook = hook; }
+
+void PowerManager::armDebugTimerWake(const uint32_t seconds, const bool simulateHeld) {
+  s_debugTimerWakeSeconds = seconds;
+  s_debugSimulateHeld = simulateHeld;
+}
 
 void PowerManager::armWakeOnPins(uint64_t gpioMask, bool wakeLow) {
 #if SOC_PM_SUPPORT_EXT1_WAKEUP
@@ -44,16 +85,38 @@ bool PowerManager::armPowerButtonWakeup() {
   return true;
 }
 
-void PowerManager::waitForPowerButtonRelease() {
+bool PowerManager::powerButtonHeld() {
+  if (s_debugSimulateHeld) return true;
   const int8_t pin = powerPin();
-  if (pin < 0) return;
+  if (pin < 0) return false;
+  const bool activeHigh = powerActiveHigh();
+  pinMode(pin, activeHigh ? INPUT_PULLDOWN : INPUT_PULLUP);
+  return digitalRead(pin) == (activeHigh ? HIGH : LOW);
+}
+
+uint32_t PowerManager::waitForPowerButtonRelease() {
+  ensureCounters();
+  const int8_t pin = powerPin();
+  if (pin < 0) {
+    s_releaseWaitMs = 0;
+    return 0;
+  }
   const bool activeHigh = powerActiveHigh();
 
   pinMode(pin, activeHigh ? INPUT_PULLDOWN : INPUT_PULLUP);
   const int pressedLevel = activeHigh ? HIGH : LOW;
-  while (digitalRead(pin) == pressedLevel) {
-    delay(50);
+  const uint32_t start = millis();
+  // 10 ms rather than the old 50: the wait is now bounded, so the poll interval
+  // is bounded work too, and a shorter one hands an ordinary release back to the
+  // sleep path faster.
+  while (digitalRead(pin) == pressedLevel && (millis() - start) < RELEASE_WAIT_MAX_MS) {
+    delay(10);
   }
+  const uint32_t waited = millis() - start;
+  s_releaseWaitMs = waited;
+  s_releaseWaitTotalMs += waited;
+  if (waited >= RELEASE_WAIT_MAX_MS) ++s_releaseTimeouts;
+  return waited;
 }
 
 namespace {
@@ -106,6 +169,13 @@ void PowerManager::powerDownRailsForSleep() {
 }
 
 void PowerManager::deepSleep() {
+  // Board park first, while I2C and the pad matrix are still alive: on boards
+  // whose panel PMIC hangs off an I2C expander this is the only unconditional
+  // power-down it gets. The display driver's own sleep call is guarded by a
+  // cached "power is already off" flag and short-circuits in the normal case,
+  // so a single missed power-down would otherwise stand for the whole night.
+  if (s_parkHook) s_parkHook();
+
   esp_sleep_config_gpio_isolate();
   gpio_deep_sleep_hold_en();
   esp_deep_sleep_start();
@@ -114,9 +184,85 @@ void PowerManager::deepSleep() {
 }
 
 void PowerManager::deepSleepUntilPowerButton() {
+  ensureCounters();
+
+  // Clear the light-sleep GPIO trigger BEFORE anything is armed below.
+  // esp_sleep_enable_gpio_wakeup() is documented as light-sleep only, but it
+  // sets a bit in the same global trigger word and nothing clears it, so an idle
+  // light sleep earlier in the session leaves it armed into deep sleep where its
+  // only effect is to keep RTC_PERIPH powered. Order matters more than the
+  // saving does: the arm has to be the last word on wake sources, so this
+  // happens up front rather than on the way out.
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
+
   waitForPowerButtonRelease();
-  armPowerButtonWakeup();
+  s_flags &= ~FLAG_STUCK_TIMER;
+
+  // Additive, and armed before the button so a test sleep still exercises the
+  // real wake source rather than replacing it.
+  if (s_debugTimerWakeSeconds != 0) {
+    esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(s_debugTimerWakeSeconds) * 1000000ULL);
+    s_debugTimerWakeSeconds = 0;
+  }
+  // Read once and clear: the flag lives in plain RAM, but every branch below
+  // sleeps without returning, so clearing it here is what guarantees the next
+  // real sleep sees the actual pad.
+  const bool simulateHeld = s_debugSimulateHeld;
+  s_debugSimulateHeld = false;
+
+  if (!simulateHeld && !powerButtonHeld()) {
+    // The ordinary case: released, so the level-triggered wake source can be
+    // armed without waking us the instant we sleep.
+    s_stuckStreak = 0;
+    s_flags &= ~FLAG_TIMED_OUT;
+    armPowerButtonWakeup();
+    deepSleep();
+  }
+
+  s_flags |= FLAG_TIMED_OUT;
+  ++s_stuckStreak;
+
+  if (s_stuckStreak < STUCK_STREAK_LIMIT) {
+    // Arming the wake on a line already at the wake level means waking straight
+    // back up. That is deliberate for the first couple of tries: a boot costs a
+    // second or two, and it is how a genuinely long press resolves itself.
+    armPowerButtonWakeup();
+    deepSleep();
+  }
+
+  // Persistently asserted. Neither remaining option is free, so take the cheap
+  // one: waking immediately burns a boot per cycle, and staying up here to poll
+  // burns ~25 mA indefinitely. Sleep on a timer instead — deep-sleep current
+  // while it holds — and re-test the line when it fires. wokeFromStuckRetry()
+  // tells the consumer that firing was ours, not the user's.
+  s_flags |= FLAG_STUCK_TIMER;
+  esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(STUCK_RETRY_SECONDS) * 1000000ULL);
   deepSleep();
+}
+
+PowerManager::SleepReport PowerManager::sleepReport() {
+  ensureCounters();
+  SleepReport out;
+  out.releaseWaitMs = s_releaseWaitMs;
+  out.releaseWaitTotalMs = s_releaseWaitTotalMs;
+  out.timeouts = s_releaseTimeouts;
+  out.stuckStreak = static_cast<uint8_t>(s_stuckStreak);
+  out.lastTimedOut = (s_flags & FLAG_TIMED_OUT) != 0;
+  out.sleptOnStuckTimer = (s_flags & FLAG_STUCK_TIMER) != 0;
+  return out;
+}
+
+void PowerManager::clearSleepCounters() {
+  ensureCounters();
+  s_releaseWaitMs = 0;
+  s_releaseWaitTotalMs = 0;
+  s_releaseTimeouts = 0;
+}
+
+bool PowerManager::wokeFromStuckRetry() {
+  ensureCounters();
+  if ((s_flags & FLAG_STUCK_TIMER) == 0) return false;
+  return esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER;
 }
 
 }  // namespace freeink

@@ -1177,19 +1177,31 @@ constexpr BoardProfile LILYGO_T5S3 = {
     {PIN_UNASSIGNED, PIN_UNASSIGNED, PIN_UNASSIGNED, PIN_UNASSIGNED, PIN_UNASSIGNED, PIN_UNASSIGNED, 0,
      false},  // power=BOOT (GPIO0), active-low; the radio owns every other free pin.
 #else
-    // Pro Lite: the four unpopulated LoRa pads are keys. back=GPIO47 (BUSY),
-    // left=GPIO1 (RST), right=GPIO46 (CS), up=GPIO10 (IRQ), power=BOOT (GPIO0),
-    // all active-low. DOWN is deliberately left free — the expander button
-    // (IO48) arrives on it from the board hook. So is CONFIRM, which carries the
-    // most special-casing in the firmware (long-press menu, the X4 Pro
-    // double-click window) and is the last slot that should acquire a key by
-    // accident; the same caution that already applied to IO48, which read
-    // spurious active-low pulses and opened the reader menu by itself.
+    // Pro Lite: THREE of the four unpopulated LoRa pads are keys. back=GPIO47
+    // (BUSY), left=GPIO1 (RST), up=GPIO10 (IRQ), power=BOOT (GPIO0), all
+    // active-low. DOWN is deliberately left free — the expander button (IO48)
+    // arrives on it from the board hook. So is CONFIRM, which carries the most
+    // special-casing in the firmware (long-press menu, the X4 Pro double-click
+    // window) and is the last slot that should acquire a key by accident; the
+    // same caution that already applied to IO48, which read spurious active-low
+    // pulses and opened the reader menu by itself.
     //
-    // These are not page-turn buttons: the app masks all five and routes them
+    // RIGHT is unassigned because the fourth pad, GPIO46 (LoRa CS), is NOT free
+    // on this board: LilyGoT5S3LgfxConfig hands it to the parallel EPD bus as
+    // pinPwr, which esp_lcd_new_i80_bus requires as its DC pin and drives LOW
+    // whenever the panel is idle. Listing it here as well made it a key that
+    // reads permanently pressed — and since a bound key counts as user activity,
+    // the inactivity clock was reset on every single loop pass. Both power
+    // savings hang off that clock, so the reader silently stopped light-sleeping
+    // between pages AND stopped auto-sleeping on timeout; the battery log showed
+    // lsleep_ms frozen and no timeout sleep for a week. A key soldered to that
+    // pad would be fighting the LCD peripheral for the pad, so there is nothing
+    // to reclaim here.
+    //
+    // These are not page-turn buttons: the app masks all four and routes them
     // through its configurable-key dispatcher, so what each one does is the
     // user's choice rather than this mapping.
-    {47, PIN_UNASSIGNED, 1, 46, 10, PIN_UNASSIGNED, 0, false},
+    {47, PIN_UNASSIGNED, 1, PIN_UNASSIGNED, 10, PIN_UNASSIGNED, 0, false},
 #endif
     PIN_UNASSIGNED,  // batteryAdc: none — uses the I2C fuel gauge below
     PIN_UNASSIGNED,

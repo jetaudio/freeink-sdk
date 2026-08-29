@@ -15,6 +15,22 @@ constexpr uint8_t PCA_REG_CONFIG0 = 0x06;
 
 SemaphoreHandle_t i2cMutex = nullptr;
 
+// What parkEpdPowerForSleep() last saw. Read back on the next boot by the
+// battery log; see the header for why the sleep path cannot report it itself.
+// RTC_NOINIT survives deep sleep and the wake reset but is garbage on a cold
+// boot, hence the magic.
+constexpr uint32_t PARK_MAGIC = 0x50524B31u;  // 'PRK1'
+RTC_NOINIT_ATTR uint32_t s_parkMagic;
+RTC_NOINIT_ATTR uint8_t s_lastParkState;
+RTC_NOINIT_ATTR bool s_lastParkOk;
+
+void ensureParkState() {
+  if (s_parkMagic == PARK_MAGIC) return;
+  s_parkMagic = PARK_MAGIC;
+  s_lastParkState = 0;
+  s_lastParkOk = false;
+}
+
 SemaphoreHandle_t ensureI2CMutex() {
   if (i2cMutex == nullptr) {
     i2cMutex = xSemaphoreCreateRecursiveMutex();
@@ -169,6 +185,63 @@ bool readButton() {
     return false;
   }
   return !high;
+}
+
+bool parkEpdPowerForSleep() {
+  // All five EPD control lines live in port 1 (linear indexes 8..15), so the
+  // park is two register writes rather than ten read-modify-writes on a bus that
+  // is about to lose its last chance to be retried.
+  constexpr uint8_t EPD_MASK = static_cast<uint8_t>((1U << (PCA9535_IO10_EP_OE - 8)) |
+                                                    (1U << (PCA9535_IO11_EP_MODE - 8)) |
+                                                    (1U << (PCA9535_IO13_TPS_PWRUP - 8)) |
+                                                    (1U << (PCA9535_IO14_VCOM_CTRL - 8)) |
+                                                    (1U << (PCA9535_IO15_TPS_WAKEUP - 8)));
+  constexpr uint8_t WAKEUP_BIT = static_cast<uint8_t>(1U << (PCA9535_IO15_TPS_WAKEUP - 8));
+
+  ensureParkState();
+  s_lastParkOk = false;
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    uint8_t config = 0;
+    uint8_t output = 0;
+    if (!i2cReadReg(T5S3_PCA9535_ADDR, PCA_REG_CONFIG0 + 1, &config, 1)) continue;
+    if (!i2cReadReg(T5S3_PCA9535_ADDR, PCA_REG_OUTPUT0 + 1, &output, 1)) continue;
+
+    // Outputs, or driving them means nothing.
+    const uint8_t wantConfig = static_cast<uint8_t>(config & ~EPD_MASK);
+    if (wantConfig != config && !i2cWriteReg(T5S3_PCA9535_ADDR, PCA_REG_CONFIG0 + 1, &wantConfig, 1)) continue;
+
+    // Rails and VCOM down first, WAKEUP last, matching epdPowerOff()'s order:
+    // the PMIC wants its outputs disabled before it loses its own supply.
+    uint8_t staged = static_cast<uint8_t>((output & ~EPD_MASK) | (output & WAKEUP_BIT));
+    if (!i2cWriteReg(T5S3_PCA9535_ADDR, PCA_REG_OUTPUT0 + 1, &staged, 1)) continue;
+    delay(1);
+    const uint8_t parked = static_cast<uint8_t>(staged & ~WAKEUP_BIT);
+    if (!i2cWriteReg(T5S3_PCA9535_ADDR, PCA_REG_OUTPUT0 + 1, &parked, 1)) continue;
+
+    uint8_t readback = 0;
+    if (!i2cReadReg(T5S3_PCA9535_ADDR, PCA_REG_OUTPUT0 + 1, &readback, 1)) continue;
+    s_lastParkState = readback;
+    if ((readback & EPD_MASK) == 0) {
+      s_lastParkOk = true;
+      break;
+    }
+  }
+
+  // STV is a plain GPIO, so it costs nothing to park here too and keeps the
+  // panel's gate driver from being handed a level while its supply collapses.
+  pinMode(EP_STV, OUTPUT);
+  digitalWrite(EP_STV, LOW);
+  return s_lastParkOk;
+}
+
+uint8_t lastEpdParkState() {
+  ensureParkState();
+  return s_lastParkState;
+}
+
+bool lastEpdParkOk() {
+  ensureParkState();
+  return s_lastParkOk;
 }
 
 }  // namespace BoardT5S3

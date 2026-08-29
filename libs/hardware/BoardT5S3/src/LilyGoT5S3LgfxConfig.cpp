@@ -123,13 +123,18 @@ bool prepareEpdPower() {
 }
 
 void epdPowerOff() {
-  BoardT5S3::writePca9535Pin(PCA9535_IO10_EP_OE, false);
-  BoardT5S3::writePca9535Pin(PCA9535_IO11_EP_MODE, false);
-  BoardT5S3::writePca9535Pin(PCA9535_IO13_TPS_PWRUP, false);
-  BoardT5S3::writePca9535Pin(PCA9535_IO14_VCOM_CTRL, false);
-  delay(1);
-  BoardT5S3::writePca9535Pin(PCA9535_IO15_TPS_WAKEUP, false);
-  digitalWrite(EP_STV, LOW);
+  // Verified, not fire-and-forget. epdPowerOn() checks every write; this used to
+  // check none, and the asymmetry is the expensive direction: a NACK on the way
+  // UP fails the refresh and is obvious, while a NACK on the way DOWN leaves the
+  // TPS65185 enabled — tens of milliamps for as long as the device stays asleep,
+  // with nothing on screen and nothing in any log to say so. The expander is on
+  // a bus it shares with the touch controller, the gauge, the charger and the
+  // RTC, so a busy moment is not hypothetical.
+  //
+  // parkEpdPowerForSleep() is the same operation done as two port writes with a
+  // readback; it runs unconditionally on the way into deep sleep and is what
+  // catches anything this misses mid-session.
+  BoardT5S3::parkEpdPowerForSleep();
 }
 
 bool epdPowerOn() {
@@ -215,6 +220,13 @@ freeink::LgfxEpdConfig buildConfig() {
   // columns, and the two modes that re-drive unchanged pixels get the charge
   // neutral clean refresh. Filling all four keeps LovyanGFX's generic LUTs,
   // which are tuned for a different panel, out of the picture entirely.
+  // pinOe and pinPwr are both the spare LoRa CS pad. Neither signal is actually
+  // wired to the ESP here -- OE and the panel rails hang off the PCA9535 and the
+  // TPS65185, driven by the power hooks above -- but esp_lcd_new_i80_bus takes
+  // pinPwr as its DC pin and will not accept "none", so the bus needs a real pad
+  // to park. That makes GPIO46 owned hardware, not an empty pad: it is why the
+  // board profile leaves input.right unassigned instead of offering it as a
+  // fourth solderable key.
   return {
       {EP_D0, EP_D1, EP_D2, EP_D3, EP_D4, EP_D5, EP_D6, EP_D7},
       EP_STH,

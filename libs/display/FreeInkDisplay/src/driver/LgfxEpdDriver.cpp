@@ -412,7 +412,23 @@ void LgfxEpdDriver::cleanupGrayscaleBuffers(EpdBus& bus, const uint8_t* bw) {
 void LgfxEpdDriver::deepSleep(EpdBus& bus) {
   (void)bus;
 #if FREEINK_DRIVER_LGFX_EPD
+  // Wait the panel task out first. Every other path in this file does
+  // (pushCanvas/pushCanvasGraded both open with it) — this one did not, and
+  // LGFX_Device::sleep() does not wait either: Panel_EPD::setSleep() is a bare
+  // powerControl(false). A refresh still in flight owns the rails, and its task
+  // re-asserts them after the diff pass, so racing it here is how the board ends
+  // up deep-sleeping with the PMIC live.
+  g_dev.waitDisplay();
   g_dev.sleep();
+
+  // Then power down for real, past the bus's cached state. powerControl() skips
+  // the hook whenever it already believes power is off — which is the normal
+  // case here, since the last refresh turned it off — so the sleep call above is
+  // usually a no-op and the whole power-down rests on that earlier attempt
+  // having worked. It clears the flag even when the hook fails, so one silent
+  // failure would stand unchallenged for the rest of the session. The hook is
+  // idempotent; calling it again costs a couple of I2C writes.
+  if (g_hooks && g_hooks->powerOff) g_hooks->powerOff();
 #endif
 }
 

@@ -39,18 +39,24 @@
 #define T5S3_LORA_BUSY 47
 
 // The Pro Lite ships the same PCB with the LoRa/GPS module unpopulated, so its
-// four radio pins reach nothing but empty pads -- pads a user can solder a key
-// to. Which build this is decides who owns them: with T5S3_HAS_LORA_GPS the
-// radio keeps them and the board parks them at boot; without it they are
-// ordinary buttons, wired into BoardConfig's input pins like any other board's
-// keys, and everything that follows from that (pull-ups, debounce, edges,
+// radio pins reach nothing but empty pads -- pads a user can solder a key to.
+// Which build this is decides who owns them: with T5S3_HAS_LORA_GPS the radio
+// keeps them and the board parks them at boot; without it they are ordinary
+// buttons, wired into BoardConfig's input pins like any other board's keys, and
+// everything that follows from that (pull-ups, debounce, edges,
 // wake-from-light-sleep, the inactivity timer) comes for free.
 //
-// All four were measured on a Pro Lite with the internal pull-up on: stable
-// HIGH over 600 ms each, GPIO46 included, so an unsoldered pad reads "not
-// pressed" rather than floating. GPIO46 is also an ESP32-S3 strapping pin, but
-// what it straps is ROM log printing, and it is only read at reset -- holding
-// a key on it through a reboot costs nothing worse than a quiet bootloader.
+// THREE of the four, though. GPIO46 (LoRa CS) is spoken for: LilyGoT5S3LgfxConfig
+// passes it to the parallel EPD bus as pinPwr, and esp_lcd_new_i80_bus demands a
+// real DC pin there, so the LCD peripheral owns the pad and parks it LOW between
+// refreshes. It was briefly a key as well, which made that key read permanently
+// pressed and — because a bound key counts as user activity — pinned the
+// inactivity clock at zero, killing both idle light sleep and the auto-sleep
+// timeout. See the BoardConfig profile's input comment.
+//
+// The other three were measured on a Pro Lite with the internal pull-up on:
+// stable HIGH over 600 ms each, so an unsoldered pad reads "not pressed" rather
+// than floating.
 //
 // Not exposed as keys, on purpose: the GPS UART pair (GPIO43/44) is the ROM
 // bootloader's console, driven by hardware this firmware does not control.
@@ -61,8 +67,8 @@
 #if !T5S3_HAS_LORA_GPS
 #define T5S3_KEY_G10 T5S3_LORA_IRQ   // GPIO10, RTC-capable
 #define T5S3_KEY_G1 T5S3_LORA_RST    // GPIO1,  RTC-capable
-#define T5S3_KEY_G46 T5S3_LORA_CS    // GPIO46, strapping pin (see above)
 #define T5S3_KEY_G47 T5S3_LORA_BUSY  // GPIO47
+// No T5S3_KEY_G46: GPIO46 belongs to the EPD i80 bus (see above).
 #endif
 
 #define T5S3_BL_EN 11
