@@ -186,14 +186,27 @@ void PowerManager::deepSleep() {
 void PowerManager::deepSleepUntilPowerButton() {
   ensureCounters();
 
-  // Clear the light-sleep GPIO trigger BEFORE anything is armed below.
-  // esp_sleep_enable_gpio_wakeup() is documented as light-sleep only, but it
-  // sets a bit in the same global trigger word and nothing clears it, so an idle
-  // light sleep earlier in the session leaves it armed into deep sleep where its
-  // only effect is to keep RTC_PERIPH powered. Order matters more than the
-  // saving does: the arm has to be the last word on wake sources, so this
-  // happens up front rather than on the way out.
-  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
+  // Start from no wake sources at all, then arm exactly what this sleep needs.
+  //
+  // Every esp_sleep_enable_*_wakeup() writes the same global trigger word, and
+  // that word is not scoped to the sleep that armed it: light sleep and deep
+  // sleep read the identical configuration. The idle light sleep between page
+  // turns arms a 150 ms timer wake every time it runs, and nothing ever cleared
+  // it -- so the first deep sleep after any light sleep inherited that timer and
+  // woke 150 ms later, which the user sees as the sleep screen appearing and the
+  // device restarting itself on the spot.
+  //
+  // That went unnoticed for as long as it did because two faults were hiding
+  // each other: a key mapped to a pad the LCD peripheral owns pinned the
+  // inactivity clock, so light sleep never ran, so the timer was never armed.
+  // Fixing the key is what exposed this one. The GPIO trigger leaks the same way
+  // (esp_sleep_enable_gpio_wakeup() is documented light-sleep-only but sets a bit
+  // here too, where its only effect is to keep RTC_PERIPH powered).
+  //
+  // Hence ALL rather than naming sources: the next one added to a light-sleep
+  // path should not be able to reintroduce this. Everything this sleep actually
+  // wants is armed below, after the clear.
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
 
   waitForPowerButtonRelease();
   s_flags &= ~FLAG_STUCK_TIMER;
