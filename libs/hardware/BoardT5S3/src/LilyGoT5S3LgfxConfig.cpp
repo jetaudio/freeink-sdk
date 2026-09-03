@@ -244,7 +244,16 @@ freeink::LgfxEpdConfig buildConfig() {
       1,
       grayDark,
       grayLight,
-      true,  // grey columns live in the fast bank above
+      // grayNudgeInFastBank: the fast bank's grey columns self-normalize — each
+      // grey drive saturates at the white rail before walking down to its level.
+      // That is only correct under the single-push path (displayGrayFrame),
+      // where the base has not already driven those pixels anywhere.
+      //
+      // It was briefly false while the consumer still ran the two-push flow, in
+      // which the B/W base drove the anti-aliased fringes BLACK first: the
+      // overlay then saturated them to white — a visible flash — and they
+      // settled too light, so the anti-aliasing read as having vanished.
+      true,
   };
 }
 
