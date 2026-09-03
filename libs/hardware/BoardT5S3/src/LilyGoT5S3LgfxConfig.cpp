@@ -122,14 +122,20 @@ bool prepareEpdPower() {
   return ok;
 }
 
-void epdPowerOff() {
-  BoardT5S3::writePca9535Pin(PCA9535_IO10_EP_OE, false);
-  BoardT5S3::writePca9535Pin(PCA9535_IO11_EP_MODE, false);
-  BoardT5S3::writePca9535Pin(PCA9535_IO13_TPS_PWRUP, false);
-  BoardT5S3::writePca9535Pin(PCA9535_IO14_VCOM_CTRL, false);
+// Every write is checked, symmetrically with epdPowerOn. Discarding them made
+// power-DOWN the one unverified half of the rail lifecycle: an I2C hiccup here
+// left the TPS65185 live with nothing able to notice, and the board could then
+// deep-sleep with the EPD PMIC powered.
+bool epdPowerOff() {
+  bool ok = true;
+  ok &= BoardT5S3::writePca9535Pin(PCA9535_IO10_EP_OE, false);
+  ok &= BoardT5S3::writePca9535Pin(PCA9535_IO11_EP_MODE, false);
+  ok &= BoardT5S3::writePca9535Pin(PCA9535_IO13_TPS_PWRUP, false);
+  ok &= BoardT5S3::writePca9535Pin(PCA9535_IO14_VCOM_CTRL, false);
   delay(1);
-  BoardT5S3::writePca9535Pin(PCA9535_IO15_TPS_WAKEUP, false);
+  ok &= BoardT5S3::writePca9535Pin(PCA9535_IO15_TPS_WAKEUP, false);
   digitalWrite(EP_STV, LOW);
+  return ok;
 }
 
 bool epdPowerOn() {
@@ -238,7 +244,16 @@ freeink::LgfxEpdConfig buildConfig() {
       1,
       grayDark,
       grayLight,
-      true,  // grey columns live in the fast bank above
+      // grayNudgeInFastBank: the fast bank's grey columns self-normalize — each
+      // grey drive saturates at the white rail before walking down to its level.
+      // That is only correct under the single-push path (displayGrayFrame),
+      // where the base has not already driven those pixels anywhere.
+      //
+      // It was briefly false while the consumer still ran the two-push flow, in
+      // which the B/W base drove the anti-aliased fringes BLACK first: the
+      // overlay then saturated them to white — a visible flash — and they
+      // settled too light, so the anti-aliasing read as having vanished.
+      true,
   };
 }
 

@@ -35,19 +35,36 @@ class FreeInkBusEPD : public lgfx::Bus_EPD {
   }
 
   bool powerControl(const bool powerOn) override {
-    if (_pwr_on == powerOn) return true;
+    // _pwr_known guards the short-circuit below. Without it a hook failure was
+    // unrecoverable: _pwr_on was assigned whether or not the rails actually
+    // moved, so one failed transition made the cached state a lie that no later
+    // call could correct -- every subsequent request for that same state
+    // returned early and never re-issued the hook. On failure the rails are in
+    // an unknown position, so neither direction may short-circuit.
+    if (_pwr_known && _pwr_on == powerOn) return true;
     const bool hooked = g_hooks && (powerOn ? g_hooks->powerOn != nullptr : g_hooks->powerOff != nullptr);
     if (!hooked) return lgfx::Bus_EPD::powerControl(powerOn);
     wait();
     if (powerOn) {
-      if (!g_hooks->powerOn()) return false;
+      if (!g_hooks->powerOn()) {
+        // The board attempts its own power-off cleanup, but it is unverified.
+        _pwr_known = false;
+        return false;
+      }
       _pwr_on = true;
+      _pwr_known = true;
       return true;
     }
-    g_hooks->powerOff();
+    const bool ok = g_hooks->powerOff();
     _pwr_on = false;
-    return true;
+    _pwr_known = ok;
+    return ok;
   }
+
+ private:
+  // Starts false: the rails' position at construction is genuinely unknown, so
+  // the first transition always reaches the hook.
+  bool _pwr_known = false;
 };
 
 class FreeInkLgfxEpd : public lgfx::LGFX_Device {
@@ -227,9 +244,18 @@ void settleDisplay() {
 void pushCanvas(lgfx::epd_mode::epd_mode_t epdMode) {
   if (!g_canvas) return;
   g_dev.waitDisplay();
+#if defined(LGFX_EPD_PUSH_TRACE) && LGFX_EPD_PUSH_TRACE
+  const uint32_t tStart = millis();
+#endif
   g_dev.setEpdMode(epdMode);
   g_canvas->pushSprite(0, 0);  // commits to the panel; Panel_EPD runs the refresh
   settleDisplay();
+#if defined(LGFX_EPD_PUSH_TRACE) && LGFX_EPD_PUSH_TRACE
+  // The PLAIN push, traced alongside the graded one so the log shows EVERY
+  // refresh this panel is asked for. A second push nobody accounts for is
+  // indistinguishable from a slow waveform when only one of the two is traced.
+  Serial.printf("[epd] plain push: mode=%d took=%lums\n", (int)epdMode, (unsigned long)(millis() - tStart));
+#endif
 }
 
 // Push the canvas keeping its grey levels, then refresh through the differential
@@ -250,13 +276,40 @@ void pushCanvas(lgfx::epd_mode::epd_mode_t epdMode) {
 void pushCanvasGraded(lgfx::epd_mode::epd_mode_t refreshMode) {
   if (!g_canvas) return;
   g_dev.waitDisplay();
+#if defined(LGFX_EPD_PUSH_TRACE) && LGFX_EPD_PUSH_TRACE
+  const uint32_t tWait = millis();
+#endif
   g_dev.setEpdMode(lgfx::epd_mode::epd_quality);
   g_dev.setAutoDisplay(false);
   g_canvas->pushSprite(0, 0);  // writes the panel buffer, queues no refresh
   g_dev.setAutoDisplay(true);
   g_dev.setEpdMode(refreshMode);
+#if defined(LGFX_EPD_PUSH_TRACE) && LGFX_EPD_PUSH_TRACE
+  const uint32_t tSprite = millis();
+#endif
   g_dev.display();  // covers the rect pushSprite accumulated
+#if defined(LGFX_EPD_PUSH_TRACE) && LGFX_EPD_PUSH_TRACE
+  const uint32_t tDisplay = millis();
+#endif
   settleDisplay();
+#if defined(LGFX_EPD_PUSH_TRACE) && LGFX_EPD_PUSH_TRACE
+  // Splits the graded push into its three parts so a slow one can be attributed.
+  // The mode is NAMED rather than numbered because the numbering invites exactly
+  // the wrong reading: LovyanGFX's enum starts at 1 (quality=1, text=2, fast=3,
+  // fastest=4), so the fast bank is 3 and a "2" is the CLEAN bank's eraser pass —
+  // the flash — not a faster one.
+  //
+  // display= is near zero by design: Panel_EPD queues the refresh and returns.
+  // The waveform is settle=, so that is the number to read.
+  const char* modeName = refreshMode == lgfx::epd_mode::epd_quality   ? "quality"
+                         : refreshMode == lgfx::epd_mode::epd_text    ? "text(clean bank, eraser)"
+                         : refreshMode == lgfx::epd_mode::epd_fast    ? "fast(diff bank)"
+                         : refreshMode == lgfx::epd_mode::epd_fastest ? "fastest"
+                                                                      : "?";
+  Serial.printf("[epd] graded push: mode=%s sprite=%lums display=%lums settle=%lums\n", modeName,
+                (unsigned long)(tSprite - tWait), (unsigned long)(tDisplay - tSprite),
+                (unsigned long)(millis() - tDisplay));
+#endif
 }
 
 }  // namespace
@@ -412,7 +465,22 @@ void LgfxEpdDriver::cleanupGrayscaleBuffers(EpdBus& bus, const uint8_t* bw) {
 void LgfxEpdDriver::deepSleep(EpdBus& bus) {
   (void)bus;
 #if FREEINK_DRIVER_LGFX_EPD
+  // Settle first. The panel task re-asserts the rails for the duration of its
+  // diff pass, so powering down while a refresh is in flight lets it power them
+  // straight back up -- and settleDisplay(), not a bare waitDisplay(), is what
+  // actually waits here (see its comment: the flag reads clear for a refresh
+  // that has not started yet).
+  settleDisplay();
   g_dev.sleep();
+
+  // Then power down unconditionally, past the bus's cached state. sleep() above
+  // routes through powerControl(false), which short-circuits whenever the rails
+  // are already believed down -- the normal case, since the last refresh turned
+  // them off -- so on its own the whole power-down rests on that earlier
+  // transition having worked. The hook is idempotent and costs a few I2C
+  // writes; deep sleep is exactly where being wrong is most expensive.
+  // Adopted from jetaudio's crosspoint-aurora.
+  if (g_hooks && g_hooks->powerOff) g_hooks->powerOff();
 #endif
 }
 
