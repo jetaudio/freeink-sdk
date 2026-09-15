@@ -13,6 +13,9 @@
 
 #if FREEINK_BATTERY_I2C_GAUGE
 #include <Wire.h>
+#if FREEINK_DEVICE_WS397
+#include <Axp2101.h>
+#endif
 
 // Minimal, dependency-free I2C fuel-gauge read for boards that carry one (e.g.
 // LilyGo T5 S3: BQ27220 gauge + BQ25896 charger). Standard TI command registers;
@@ -205,6 +208,14 @@ bool cw2017EnsureProfile(const uint8_t addr) {
 // SoC (0..100) from the active gauge, dispatched by type. false on I2C failure.
 bool readGaugeSoc(uint16_t& out) {
   const auto& g = BoardConfig::ACTIVE.batteryGauge;
+#if FREEINK_DEVICE_WS397
+  if (g.gaugeType == BoardConfig::GaugeType::Axp2101) {
+    uint8_t soc = 0;
+    if (!freeink::axp2101::batteryPercent(soc)) return false;
+    out = soc;
+    return true;
+  }
+#endif
   if (g.gaugeType == BoardConfig::GaugeType::Cw2017) {
     static bool initialized = false;
     static unsigned long lastInitAttemptMs = 0;
@@ -241,6 +252,9 @@ bool readGaugeSoc(uint16_t& out) {
 // Battery voltage (mV) from the active gauge, dispatched by type. false on failure.
 bool readGaugeMillivolts(uint16_t& out) {
   const auto& g = BoardConfig::ACTIVE.batteryGauge;
+#if FREEINK_DEVICE_WS397
+  if (g.gaugeType == BoardConfig::GaugeType::Axp2101) return freeink::axp2101::batteryMillivolts(out);
+#endif
   if (g.gaugeType == BoardConfig::GaugeType::Cw2017) {
     uint8_t hi = 0, lo = 0;
     if (!readReg8(g.gaugeAddr, CW2017_REG_VCELL_H, hi)) return false;
@@ -268,6 +282,9 @@ bool readGaugeMillivolts(uint16_t& out) {
 // a board with neither gaugeAddr nor chargerAddr).
 bool readGaugeCharging(bool& known) {
   const auto& g = BoardConfig::ACTIVE.batteryGauge;
+#if FREEINK_DEVICE_WS397
+  if (g.gaugeType == BoardConfig::GaugeType::Axp2101) return freeink::axp2101::isCharging(known);
+#endif
   // CW2017 has no current register and the X4 Pro has no charger IC on this bus, so
   // charging state is not observable from the gauge (the OEM infers it elsewhere).
   if (g.gaugeType == BoardConfig::GaugeType::Cw2017) {
@@ -456,7 +473,20 @@ uint16_t BatteryMonitor::readMillivolts() const {
   const uint16_t mv = esp_adc_cal_raw_to_voltage(raw, &adc_chars);
 #else
   // ESP-IDF 5.x has analogReadMilliVolts
-  const uint16_t mv = analogReadMilliVolts(_adcPin);
+  // OnePage only: pause charging around the read. Other boards with a
+  // chargeEnable pin (e.g. Sticky) must NOT have it glitched during battery reads.
+  uint16_t mv = 0;
+  if (BoardConfig::isOnePage() && BoardConfig::ACTIVE.power.chargeEnable >= 0) {
+    const int8_t ce = BoardConfig::ACTIVE.power.chargeEnable;
+    const bool activeHigh = BoardConfig::ACTIVE.power.chargeEnableActiveHigh;
+    pinMode(ce, OUTPUT);
+    digitalWrite(ce, activeHigh ? LOW : HIGH);  // pause charging
+    delay(5);
+    mv = analogReadMilliVolts(_adcPin);
+    digitalWrite(ce, activeHigh ? HIGH : LOW);  // resume charging
+  } else {
+    mv = analogReadMilliVolts(_adcPin);
+  }
 #endif
 
   return static_cast<uint16_t>(mv * _dividerMultiplier);

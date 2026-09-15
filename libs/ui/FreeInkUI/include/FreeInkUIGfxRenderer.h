@@ -23,6 +23,8 @@
 
 #include <algorithm>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace freeink {
@@ -35,9 +37,26 @@ class GfxRendererTarget final : public DrawTarget {
   static constexpr FontId FONT_TITLE = 2;
   static constexpr size_t FONT_SLOTS = 3;
 
-  explicit GfxRendererTarget(const GfxRenderer& renderer) : renderer(renderer) {
+  explicit GfxRendererTarget(const GfxRenderer& renderer, const bool hasTouch = false)
+      : renderer(renderer), hasTouch_(hasTouch) {
     for (size_t i = 0; i < FONT_SLOTS; ++i) fonts[i] = 0;
   }
+
+  Rect clipRect() const override { return clip_; }
+  bool setClipRect(Rect rect) override {
+    if (!trySetClip(renderer, rect, 0)) return false;
+    clip_ = rect;
+    return true;
+  }
+
+  template <typename R>
+  static auto trySetClip(const R& r, Rect rect, int)
+      -> decltype(r.setClipRect(rect.x, rect.y, rect.width, rect.height), true) {
+    r.setClipRect(rect.x, rect.y, rect.width, rect.height);
+    return true;
+  }
+  template <typename R>
+  static bool trySetClip(const R&, Rect, long) { return false; }
 
   void setFont(const FontId slot, const int gfxFontId) {
     if (slot < FONT_SLOTS) fonts[slot] = gfxFontId;
@@ -53,6 +72,15 @@ class GfxRendererTarget final : public DrawTarget {
     // FreeInkUI components and the firmware's own tap path map taps identically.
     device.touchOrientation = touchOrientationFor(device.orientation);
     device.hasButtons = true;
+    device.hasTouch = hasTouch_;
+    // Board viewable insets (bezel / rounded-corner clearance), oriented to the
+    // current rotation, become the fui safe area — so every fui screen's body,
+    // list, and popups lay out inside the bezel automatically. Zero on
+    // rectangular panels. Insets order is {top, right, bottom, left}.
+    int viTop = 0, viRight = 0, viBottom = 0, viLeft = 0;
+    renderer.getOrientedViewableTRBL(&viTop, &viRight, &viBottom, &viLeft);
+    device.safeArea = Insets{static_cast<int16_t>(viTop), static_cast<int16_t>(viRight),
+                             static_cast<int16_t>(viBottom), static_cast<int16_t>(viLeft)};
     return device;
   }
 
@@ -127,11 +155,51 @@ class GfxRendererTarget final : public DrawTarget {
     renderer.fillPolygon(xs, ys, 3, paint.color != Color::White);
   }
 
+  // Dithered (gray) text needs GfxRenderer::drawTextDither /
+  // drawTextRotated90CWDither. Firmwares that predate them still compile:
+  // each helper's method-calling overload only instantiates when the renderer
+  // has the method (the int/long parameter breaks the tie in its favor);
+  // otherwise the fallback overload wins, returns false, and the caller draws
+  // solid ink -- the old collapse-to-black behavior. The renderer type must
+  // arrive as a template parameter so the lookup is dependent; naming
+  // GfxRenderer directly would hard-require the newer API again.
+  template <typename R>
+  static auto tryDrawTextDither(const R& r, const int fontId, const int x, const int y, const char* line,
+                                const ::Color color, const EpdFontFamily::Style st, int)
+      -> decltype(r.drawTextDither(fontId, x, y, line, color, st), true) {
+    r.drawTextDither(fontId, x, y, line, color, st);
+    return true;
+  }
+  template <typename R>
+  static bool tryDrawTextDither(const R&, int, int, int, const char*, ::Color, EpdFontFamily::Style, long) {
+    return false;
+  }
+  template <typename R>
+  static auto tryDrawTextRotatedDither(const R& r, const int fontId, const int x, const int y, const char* line,
+                                       const ::Color color, const EpdFontFamily::Style st, int)
+      -> decltype(r.drawTextRotated90CWDither(fontId, x, y, line, color, st), true) {
+    r.drawTextRotated90CWDither(fontId, x, y, line, color, st);
+    return true;
+  }
+  template <typename R>
+  static bool tryDrawTextRotatedDither(const R&, int, int, int, const char*, ::Color, EpdFontFamily::Style, long) {
+    return false;
+  }
+
   void text(const Rect rect, const char* text, const TextStyle style) override {
     if (!text || rect.empty()) return;
     const int fontId = gfxFont(style.font);
     const EpdFontFamily::Style epdStyle = fontStyle(style);
-    const bool black = !style.inverted && style.color != Color::White;
+    // A solid foreground maps to the legacy 1-bit `black` flag; a dithered
+    // foreground (a disabled row's dither(LightGray)) is passed through to the
+    // renderer's dithered text path so it renders gray instead of solid black.
+    // `inverted` marks paper-colored text (textStyleWithForeground sets it
+    // alongside a White color for labels on filled elements); honor it as
+    // "draw paper", NOT as a color flip -- flipping the White-and-inverted
+    // pair lands back on black and paints filled tiles' labels invisible.
+    const Color inkColor = style.inverted ? Color::White : style.color;
+    const bool black = inkColor == Color::Black;
+    const bool dithered = inkColor != Color::Black && inkColor != Color::White;
     const int lh = renderer.getLineHeight(fontId);
     const uint8_t maxLines = style.maxLines > 0 ? style.maxLines : 1;
 
@@ -148,19 +216,41 @@ class GfxRendererTarget final : public DrawTarget {
         if (style.align == TextAlign::Center) y = rect.y + (rect.height + textLen) / 2;
         if (style.align == TextAlign::Right) y = rect.bottom();
         const int x = rect.x + std::max(0, (rect.width - lh) / 2);
-        renderer.drawTextRotated90CW(fontId, x, y, textLine.c_str(), black, epdStyle);
+        if (dithered && tryDrawTextRotatedDither(renderer, fontId, x, y, textLine.c_str(), gfxColor(inkColor),
+                                                 epdStyle, 0)) {
+          return;
+        }
+        renderer.drawTextRotated90CW(fontId, x, y, textLine.c_str(), black || dithered, epdStyle);
         return;
       }
     }
 
     const auto drawAligned = [&](const char* textLine, const int y) {
       int x = rect.x;
+      int drawY = y;
       if (style.align != TextAlign::Left) {
         const int textW = renderer.getTextWidth(fontId, textLine, epdStyle);
         x = style.align == TextAlign::Center ? rect.x + (rect.width - textW) / 2 : rect.x + rect.width - textW;
         if (x < rect.x) x = rect.x;
       }
-      renderer.drawText(fontId, x, y, textLine, black, epdStyle);
+      // Single digits need ink centering: getTextWidth includes the left
+      // bearing, while drawText adds it again to the pen origin. Line-box
+      // centering also leaves the numeral low when the font has tall ascenders.
+      if (style.align == TextAlign::Center && textLine[0] >= '0' && textLine[0] <= '9' && textLine[1] == '\0' &&
+          (epdStyle & (EpdFontFamily::SUP | EpdFontFamily::SUB)) == 0) {
+        const auto& fonts = renderer.getFontMap();
+        const auto font = fonts.find(fontId);
+        const auto* glyph = font != fonts.end() ? font->second.getGlyph(static_cast<uint32_t>(textLine[0]), epdStyle)
+                                               : nullptr;
+        if (glyph && glyph->width > 0 && glyph->height > 0 && glyph->width <= rect.width && glyph->height <= rect.height) {
+          x = rect.x + (rect.width - glyph->width) / 2 - glyph->left;
+          drawY = rect.y + (rect.height - glyph->height) / 2 + glyph->top - renderer.getFontAscenderSize(fontId);
+        }
+      }
+      if (dithered && tryDrawTextDither(renderer, fontId, x, drawY, textLine, gfxColor(inkColor), epdStyle, 0)) {
+        return;
+      }
+      renderer.drawText(fontId, x, drawY, textLine, black || dithered, epdStyle);
     };
 
     // Fast path for the common case: text that already fits on one line draws
@@ -210,7 +300,9 @@ class GfxRendererTarget final : public DrawTarget {
   }
 
  private:
+  Rect clip_{0, 0, 32767, 32767};
   const GfxRenderer& renderer;
+  bool hasTouch_ = false;
   int fonts[FONT_SLOTS];
 
   int gfxFont(const FontId slot) const { return slot < FONT_SLOTS ? fonts[slot] : fonts[FONT_BODY]; }

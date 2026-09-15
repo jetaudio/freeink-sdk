@@ -648,9 +648,15 @@ struct ThemeTokens {
   int16_t headerHeight = 44;
   int16_t footerHeight = 40;
   int16_t progressHeight = 4;
-  // List shape tokens: the theme supplies geometry (gaps, radii, insets)
-  // while rowHeight and text sizes derive from the bound fonts. Screen::list()
-  // forwards these into any ListProps field left at its inherit sentinel.
+  // Lists size each row from its content, separately from generic controls.
+  // An optional minimum supports deliberately spacious list themes.
+  int16_t listMinRowHeight = 0;
+  int16_t listRowPaddingY = 4;
+  // Touch comfort is distinct from the minimum valid hit-target size.
+  int16_t listTouchMinRowHeight = 56;
+  int16_t listTouchRowPaddingY = 8;
+  int16_t listTouchRowGap = 6;
+  // List shape tokens forwarded by Screen::resolveListProps().
   int16_t listRowGap = 0;
   uint8_t listRowRadius = 0;
   int16_t listSidePadding = 8; // text inset within a row
@@ -702,6 +708,10 @@ struct ThemeDocument {
 class DrawTarget {
 public:
   virtual ~DrawTarget() = default;
+  // Optional pixel clipping in logical coordinates. Unsupported targets return
+  // false; components must then omit partially visible content.
+  virtual Rect clipRect() const { return Rect{0, 0, 32767, 32767}; }
+  virtual bool setClipRect(Rect) { return false; }
   virtual Size measureText(FontId font, const char *text,
                            TextStyle style) const = 0;
   virtual int16_t lineHeight(FontId font) const = 0;
@@ -928,6 +938,9 @@ public:
 
   void setEnabled(bool enabled) { enabled_ = enabled; }
   bool enabled() const { return enabled_; }
+
+  Rect clipRect() const override { return inner_.clipRect(); }
+  bool setClipRect(Rect rect) override { return inner_.setClipRect(rect); }
 
   Size measureText(FontId font, const char *text,
                    TextStyle style) const override {
@@ -1162,6 +1175,12 @@ private:
   int16_t active_ = -1;
   // Mirrors the last routed frame's contact, so its opening frame is visible.
   bool contactHeld_ = false;
+  // Last x a bound drag dispatched from, -1 until the contact drags. A
+  // released drag commits from here: the release edge itself carries either
+  // the tap classifier's touch-DOWN point (contacts under the swipe
+  // threshold) or off-target -1,-1 coords, so routing the release like a tap
+  // snaps the value back to where the drag STARTED (or drops it entirely).
+  int16_t lastDragX_ = -1;
   ActionId flashAction_ = NO_ACTION; // tap-flash target (see setFlash)
   int16_t flashValue_ = 0;
 
@@ -1265,6 +1284,7 @@ private:
     if (input.touchReleased) contactHeld_ = false;
     if (contactBegan) {
       active_ = findTouch(slot, input.touchX, input.touchY, InputDrag);
+      lastDragX_ = -1;
     }
 
     // Runs second so an adapter reporting both edges on one frame keeps its
@@ -1282,11 +1302,29 @@ private:
           acceptsInput(held.inputMask, InputDrag)) {
         ActionEvent dragged = eventFor(slot, active_);
         dragged.dragPermille = dragPermilleFor(held.rect, input.touchX);
+        lastDragX_ = input.touchX;
         return dragged;
       }
     }
 
     if (input.touchReleased) {
+      // A contact that dragged commits as a drag, at the last held position
+      // (grab semantics: even off the rect). It must not fall through to the
+      // tap path below, whose coordinates are the touch-down point.
+      if (lastDragX_ >= 0 && active_ >= 0 &&
+          active_ < static_cast<int16_t>(slotCount)) {
+        const Interaction &held = interactions_[slot][active_];
+        const int16_t releaseIdx = active_;
+        active_ = -1;
+        if (!hasState(held.state, StateDisabled) &&
+            acceptsInput(held.inputMask, InputDrag)) {
+          ActionEvent released = eventFor(slot, releaseIdx);
+          released.dragPermille = dragPermilleFor(held.rect, lastDragX_);
+          lastDragX_ = -1;
+          return released;
+        }
+      }
+      lastDragX_ = -1;
       const int16_t idx =
           findTouch(slot, input.touchX, input.touchY,
                     input.longPress ? InputLongPress : InputTouch);
@@ -1679,6 +1717,26 @@ inline BitmapRef lucideDeleteIcon16() {
       0xF3, 0xFD, 0xF8, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
   };
   return BitmapRef{bits, 16, 16, BitmapFormat::Mask1};
+}
+
+// Lucide's globe at 32px, the size the key sizer lands on for a keyboard row.
+// Half that is not enough: the disc, its two meridians and the equator have no
+// detail to spare, and nothing else in the set needs this much room.
+inline BitmapRef lucideGlobeIcon32() {
+  static constexpr uint8_t bits[] = {
+      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFC, 0x3F, 0xFF,
+      0xFF, 0xE0, 0x07, 0xFF, 0xFF, 0x80, 0x01, 0xFF, 0xFE, 0x00, 0x00, 0x7F,
+      0xFC, 0x18, 0x18, 0x3F, 0xF8, 0x71, 0x8E, 0x1F, 0xF8, 0xF1, 0x8F, 0x1F,
+      0xF1, 0xE3, 0xC7, 0x8F, 0xF1, 0xE3, 0xC7, 0x8F, 0xE3, 0xE3, 0xC7, 0xC7,
+      0xE3, 0xE7, 0xE7, 0xC7, 0xE7, 0xC7, 0xE3, 0xE7, 0xC7, 0xC7, 0xE3, 0xE3,
+      0xC0, 0x00, 0x00, 0x03, 0xC0, 0x00, 0x00, 0x03, 0xC7, 0xC7, 0xE3, 0xE3,
+      0xE7, 0xC7, 0xE3, 0xE7, 0xE3, 0xE7, 0xE7, 0xC7, 0xE3, 0xE3, 0xC7, 0xC7,
+      0xF1, 0xE3, 0xC7, 0x8F, 0xF1, 0xE3, 0xC7, 0x8F, 0xF8, 0xF1, 0x8F, 0x1F,
+      0xF8, 0x71, 0x8E, 0x1F, 0xFC, 0x18, 0x18, 0x3F, 0xFE, 0x00, 0x00, 0x7F,
+      0xFF, 0x80, 0x01, 0xFF, 0xFF, 0xE0, 0x07, 0xFF, 0xFF, 0xFC, 0x3F, 0xFF,
+      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+  };
+  return BitmapRef{bits, 32, 32, BitmapFormat::Mask1};
 }
 
 inline void drawBorderEdges(DrawTarget &target, Rect rect, Paint paint,

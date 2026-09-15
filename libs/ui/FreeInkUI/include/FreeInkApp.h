@@ -65,6 +65,16 @@ public:
   void setContentMargin(Insets margin) {
     content_ = insetClamped(frame_.safeRect(), margin);
   }
+  // Reserves chrome measured from the physical screen edges while preserving
+  // the device safe area. A reservation already covered by a safe-area inset
+  // does not inset the content a second time.
+  void setContentMarginFromScreen(Insets margin) {
+    const Insets safe = frame_.device().safeArea;
+    setContentMargin(Insets{marginBeyondSafeArea(margin.top, safe.top),
+                            marginBeyondSafeArea(margin.right, safe.right),
+                            marginBeyondSafeArea(margin.bottom, safe.bottom),
+                            marginBeyondSafeArea(margin.left, safe.left)});
+  }
   void insetContent(Insets margin) {
     content_ = insetClamped(content_, margin);
   }
@@ -242,8 +252,9 @@ public:
     list(props, height, anchor);
   }
 
-  void list(const ListProps &props, int16_t height = 0,
-            LayoutAnchor anchor = LayoutAnchor::Top) {
+  // Resolve once before navigation/window allocation, using the same policy
+  // as drawing. Explicit row heights remain caller-supplied minimums.
+  ListProps resolveListProps(const ListProps &props) {
     ListProps themed = props;
     if (textStyleUnset(themed.labelText))
       themed.labelText = theme_.bodyText;
@@ -280,10 +291,29 @@ public:
       }
       themed.rowStyles = styles;
     }
-    if (themed.rowHeight <= 0)
-      themed.rowHeight = theme_.rowHeight;
-    if (themed.rowGap < 0)
+    if (themed.rowHeight <= 0) {
+      if (themed.rowPaddingY < 0) {
+        const int16_t padding = device().hasTouch ? theme_.listTouchRowPaddingY : theme_.listRowPaddingY;
+        themed.rowPaddingY = padding < 0 ? 0 : padding;
+      }
+      themed.rowHeight = static_cast<int16_t>(target().lineHeight(themed.labelText.font) +
+                                              2 * themed.rowPaddingY);
+      if (themed.rowHeight < theme_.listMinRowHeight)
+        themed.rowHeight = theme_.listMinRowHeight;
+      if (device().hasTouch) {
+        const int16_t touchMin = device().minTouchSize > theme_.minTouchSize
+                                    ? device().minTouchSize : theme_.minTouchSize;
+        if (themed.rowHeight < touchMin)
+          themed.rowHeight = touchMin;
+        if (themed.rowHeight < theme_.listTouchMinRowHeight)
+          themed.rowHeight = theme_.listTouchMinRowHeight;
+      }
+    }
+    if (themed.rowGap < 0) {
       themed.rowGap = theme_.listRowGap;
+      if (device().hasTouch && themed.rowGap < theme_.listTouchRowGap)
+        themed.rowGap = theme_.listTouchRowGap;
+    }
     if (themed.rowRadius == 0)
       themed.rowRadius = theme_.listRowRadius;
     if (themed.sidePadding < 0)
@@ -298,6 +328,18 @@ public:
     // the band's true edge.
     if (themed.rowInset < 0)
       themed.rowInset = theme_.listInset;
+    return themed;
+  }
+
+  void syncListViewport(ListNav &nav, ListProps &props, const int count,
+                        const int selectionOffset = 0) {
+    props = resolveListProps(props);
+    nav.syncToProps(content_, props.rowHeight, props.rowGap, count, props, selectionOffset);
+  }
+
+  void list(const ListProps &props, int16_t height = 0,
+            LayoutAnchor anchor = LayoutAnchor::Top) {
+    const ListProps themed = resolveListProps(props);
     ui::list(frame_, height > 0 ? take(anchor, height) : content_, themed);
   }
 
@@ -382,20 +424,34 @@ public:
     SheetProps themed = props;
     if (themed.radius == RADIUS_INHERIT)
       themed.radius = theme_.sheetRadius;
-    const Rect bounds = frame_.safeRect();
+    // A sheet is an edge overlay: draw its body FULL-BLEED to the screen edge so it
+    // covers the bezel/status area (nothing behind it peeks out at the anchored
+    // edge). Only the ANCHORED edge bleeds out; the free edge (and its grabber)
+    // stays at the safe-area position `height` describes, so we grow the body by
+    // the anchored-edge inset rather than shifting it. Content is still clamped to
+    // the safe area below, so rows clear the rounded corners.
+    const Rect full = frame_.device().screen();
+    const Rect safe = frame_.safeRect();
+    const int16_t topInset =
+        safe.y > full.y ? static_cast<int16_t>(safe.y - full.y) : 0;
+    const int16_t bottomInset =
+        full.bottom() > safe.bottom() ? static_cast<int16_t>(full.bottom() - safe.bottom()) : 0;
     const Rect rect =
         themed.anchor == SheetEdge::Top
-            ? Rect{bounds.x, bounds.y, bounds.width, height}
-            : Rect{bounds.x, static_cast<int16_t>(bounds.bottom() - height),
-                   bounds.width, height};
+            ? Rect{full.x, full.y, full.width, static_cast<int16_t>(height + topInset)}
+            : Rect{full.x, static_cast<int16_t>(full.bottom() - height - bottomInset),
+                   full.width, static_cast<int16_t>(height + bottomInset)};
     ui::sheet(frame_, rect, themed);
     const Rect content = sheetContentRect(rect, themed);
-    setContentMargin(Insets{
-        static_cast<int16_t>(content.y - bounds.y),
-        0,
-        static_cast<int16_t>(bounds.bottom() - content.bottom()),
-        0});
-    return content;
+    // setContentMargin() insets from safeRect, so content already clears the side
+    // bezel; here we only push it to the sheet's content band vertically.
+    const int16_t topMargin =
+        content.y > safe.y ? static_cast<int16_t>(content.y - safe.y) : 0;
+    const int16_t bottomMargin = safe.bottom() > content.bottom()
+                                     ? static_cast<int16_t>(safe.bottom() - content.bottom())
+                                     : 0;
+    setContentMargin(Insets{topMargin, 0, bottomMargin, 0});
+    return body();
   }
 
   void dropdown(const DropdownProps &props,
@@ -442,16 +498,17 @@ public:
 
   void qwertyKeyboard(const QwertyKeyboardProps &props, int16_t height = 0,
                       LayoutAnchor anchor = LayoutAnchor::Top) {
-    ui::qwertyKeyboard(
-        frame_, take(anchor, height > 0 ? height : defaultKeyboardHeight()),
-        props);
+    const auto &layout = builtinKeyboardLayout(props.layout, props.shifted, props.symbols,
+                                                props.numberRow, props.langKey);
+    ui::qwertyKeyboard(frame_, takeKeyboard(anchor, height, layout.rowCount, props.padding,
+                                           props.rowGap, props.minTouchSize), props);
   }
 
   void keyboard(const KeyboardProps &props, int16_t height = 0,
                 LayoutAnchor anchor = LayoutAnchor::Top) {
-    ui::keyboard(frame_,
-                 take(anchor, height > 0 ? height : defaultKeyboardHeight()),
-                 props);
+    if (!props.layout) return;
+    ui::keyboard(frame_, takeKeyboard(anchor, height, props.layout->rowCount, props.padding,
+                                     props.rowGap, props.minTouchSize), props);
   }
 
   void bookCard(const BookCardProps &props, int16_t height = 0,
@@ -602,19 +659,25 @@ public:
   }
 
 private:
-  int16_t defaultKeyboardHeight() const {
+  Rect takeKeyboard(LayoutAnchor anchor, int16_t height, uint8_t rows,
+                    Insets padding, int16_t rowGap, int16_t minTouchSize) {
     const Rect safe = frame_.safeRect();
-    int16_t height =
-        static_cast<int16_t>(theme_.rowHeight * 3 + theme_.spaceSm * 3);
-    const int16_t widthBased = static_cast<int16_t>(safe.width / 4);
-    if (widthBased > height)
-      height = widthBased;
-    const int16_t maxHeight = static_cast<int16_t>(safe.height * 45 / 100);
-    if (height > maxHeight)
-      height = maxHeight;
-    if (height > safe.height)
-      height = safe.height;
-    return height < 1 ? 1 : height;
+    if (height <= 0) {
+      const int16_t minRow = minTouchSize > 64 ? minTouchSize : 64;
+      height = keyboardPreferredHeight(safe.width, rows, padding, rowGap, minRow);
+      // Keep the existing key heights when increasing the vertical separation.
+      // The half-screen budget includes a baseline 2px gap; add only the extra
+      // row spacing, leaving the entry field above the keyboard.
+      const int16_t extraGap = rowGap > 2 ? rowGap - 2 : 0;
+      const int16_t maxHeight = static_cast<int16_t>(safe.height / 2 + extraGap * (rows > 0 ? rows - 1 : 0));
+      if (height > maxHeight) height = maxHeight;
+    }
+    Rect rect = take(anchor, height);
+    // Text content margins should not squeeze the keyboard. Honor hardware
+    // safe areas, while using the full horizontal band reserved by take().
+    rect.x = safe.x;
+    rect.width = safe.width;
+    return rect;
   }
 
   static Rect insetClamped(Rect rect, Insets margin) {
@@ -629,6 +692,11 @@ private:
     return Rect{static_cast<int16_t>(x), static_cast<int16_t>(y),
                 static_cast<int16_t>(right - x),
                 static_cast<int16_t>(bottom - y)};
+  }
+
+  static int16_t marginBeyondSafeArea(const int16_t margin,
+                                      const int16_t safeInset) {
+    return margin > safeInset ? static_cast<int16_t>(margin - safeInset) : 0;
   }
 
   FrameType &frame_;

@@ -2,8 +2,12 @@
 
 #include <Arduino.h>
 #include <BoardConfig.h>
+#include <driver/gpio.h>
 #include <esp_sleep.h>
 #include <soc/soc_caps.h>
+#if FREEINK_DEVICE_WS397
+#include <Axp2101.h>
+#endif
 
 namespace freeink {
 namespace {
@@ -135,6 +139,11 @@ void holdRailOff(int8_t pin, uint8_t offLevel) {
 
 void PowerManager::powerDownRailsForSleep() {
   const auto& b = BoardConfig::ACTIVE;
+#if FREEINK_DEVICE_WS397
+  // The EPD rail is an AXP2101 LDO, not a GPIO, so holdRailOff() below cannot
+  // reach it — drop it here or the panel stays powered all through deep sleep.
+  axp2101::setEpdPower(false);
+#endif
   // Keep RESET defined through deep sleep, but never drive an unpowered panel's
   // input HIGH: on boards with a gated EPD rail (Sticky), that can back-power the
   // controller through its RESET protection diode and turn sleep into a
@@ -177,7 +186,9 @@ void PowerManager::deepSleep() {
   if (s_parkHook) s_parkHook();
 
   esp_sleep_config_gpio_isolate();
+#if !FREEINK_MCU_C61
   gpio_deep_sleep_hold_en();
+#endif
   esp_deep_sleep_start();
   while (true) {
   }  // esp_deep_sleep_start() does not return; satisfy [[noreturn]]
