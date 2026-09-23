@@ -520,6 +520,34 @@ public:
                  props);
   }
 
+  void coverShelf(const CoverShelfProps &props, int16_t height = 252,
+                  LayoutAnchor anchor = LayoutAnchor::Top) {
+    CoverShelfProps themed = props;
+    if (textStyleUnset(themed.headingText)) themed.headingText = theme_.titleText;
+    if (textStyleUnset(themed.card.titleText)) themed.card.titleText = theme_.bodyText;
+    if (textStyleUnset(themed.card.authorText)) themed.card.authorText = theme_.bodyText;
+    ui::coverShelf(frame_, take(anchor, height), themed);
+  }
+
+  void catalogPage(const CatalogPageProps &props) {
+    ui::catalogPage(frame_, content_, props);
+  }
+
+  // Publication detail fills the body left by the app's header and footer.
+  void publicationPage(const PublicationPageProps &props) {
+    PublicationPageProps themed = props;
+    if (textStyleUnset(themed.book.titleText)) themed.book.titleText = theme_.titleText;
+    if (textStyleUnset(themed.book.detailText)) themed.book.detailText = theme_.bodyText;
+    if (textStyleUnset(themed.availability.headingText)) themed.availability.headingText = theme_.bodyText;
+    if (textStyleUnset(themed.availability.detailText)) themed.availability.detailText = theme_.bodyText;
+    if (textStyleUnset(themed.headingText)) themed.headingText = theme_.bodyText;
+    if (textStyleUnset(themed.bodyText)) themed.bodyText = theme_.bodyText;
+    if (textStyleUnset(themed.primary.text)) themed.primary.text = theme_.bodyText;
+    if (textStyleUnset(themed.secondary.text)) themed.secondary.text = theme_.bodyText;
+    if (textStyleUnset(themed.more.text)) themed.more.text = theme_.bodyText;
+    ui::publicationPage(frame_, content_, themed);
+  }
+
   // Multi-line writing canvas. Fills the remaining body by default; pass a
   // height to reserve a band. Text defaults to the theme body style.
   void textArea(const TextAreaProps &props, int16_t height = 0,
@@ -650,12 +678,30 @@ public:
     ui::popup(frame_, centeredRect(bounds, panelSize), themed);
   }
 
+  // Theme substitution follows the slots optionDialog documents: a small
+  // caption, a prominent headline, a body line, and the option buttons. The
+  // measured height uses the SAME substituted styles as the draw, so a caller
+  // that leaves the styles to the theme gets a panel sized for the fonts it
+  // actually renders with.
   void dialog(const OptionDialogProps &props, int16_t width = 0) {
+    OptionDialogProps themed = props;
+    if (textStyleUnset(themed.titleText))
+      themed.titleText = theme_.smallText;
+    if (textStyleUnset(themed.headlineText))
+      themed.headlineText = theme_.titleText;
+    if (textStyleUnset(themed.messageText))
+      themed.messageText = theme_.bodyText;
+    if (textStyleUnset(themed.buttonText))
+      themed.buttonText = theme_.bodyText;
+    if (themed.styles.unset())
+      themed.styles = theme_.popup;
+    if (themed.buttonStyles.unset())
+      themed.buttonStyles = theme_.button;
     if (width <= 0)
       width = static_cast<int16_t>(frame_.safeRect().width * 4 / 5);
-    const int16_t height = optionDialogHeight(frame_.target(), props, width);
+    const int16_t height = optionDialogHeight(frame_.target(), themed, width);
     ui::optionDialog(
-        frame_, centeredRect(frame_.safeRect(), Size{width, height}), props);
+        frame_, centeredRect(frame_.safeRect(), Size{width, height}), themed);
   }
 
 private:

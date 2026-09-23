@@ -64,6 +64,28 @@ struct LgfxEpdConfig {
   // the greys still come out dithered there, which is a waveform gap on that
   // board, not something this driver can paper over.
   bool grayNudgeInFastBank = false;
+  // True when this panel's clean bank only scrubs the whole screen if the refresh
+  // BEFORE it did not also use the clean bank.
+  //
+  // The mechanism is Panel_EPD's, not the board's: its epd_text branch drives a
+  // pixel unless it was already REQUESTED WHITE under that same bank and is
+  // requested white again (Panel_EPD.cpp, the `white != d1 || d1 != s0` test, in
+  // which `white` embeds the bank's own LUT offset). After a push through any
+  // other bank every pixel compares unequal and the whole screen is driven; after
+  // another clean push the untouched white background is skipped, so only the
+  // union of the old and the new ink is driven. On a bank that rail-normalizes
+  // before it lands -- black, then white, then down to the level -- that reads on
+  // the glass as both pages standing at once, and the old ink then settles beside
+  // a background that was never driven, leaving its shape as a faint imprint.
+  //
+  // Set it on a board whose clean table works that way. The driver's answer is
+  // normalizeForCleanBank(), which re-tags the background rather than re-driving
+  // it; see LgfxEpdDriver.cpp for why that is nearly free.
+  //
+  // Left false for a board on LovyanGFX's stock LUTs. Such a board keeps today's
+  // behaviour exactly: Half and Full both take the clean bank, with no
+  // normalizing pass.
+  bool cleanBankNeedsFreshBackground = false;
 };
 
 // Canvas byte that quantises to exactly `level` for every Bayer cell.
