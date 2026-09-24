@@ -425,6 +425,7 @@ class InputManager {
   unsigned long lastTouchHeldDurationMs = 0;     // contact duration, latched at release
   bool touchMovedBeyondTapSlop = false;          // cancels stationary hold/long-press classification
   bool touchMovedBeyondTapReleaseSlop = false;   // cancels tap-on-release once motion reaches swipe distance
+  unsigned long lastTouchServiceAt = 0;          // previous serviceTouch() call (0 = none yet)
   bool touchLongPressEvent = false;              // one-shot, mirrors touchHomeKeyLongEvent
   bool touchLongPressFired = false;              // latched for the current contact so long-press fires once
   bool touchSuppressed = false;                  // suppressTouchContact() latch; holds through
@@ -453,6 +454,11 @@ class InputManager {
   static constexpr int TOUCH_SWIPE_MIN_PX = 60;
   static constexpr int TOUCH_TAP_RELEASE_SLOP_PX = TOUCH_SWIPE_MIN_PX - 1;
   static constexpr unsigned long TOUCH_SWIPE_MAX_MS = 700;
+  // Touch is polled from the firmware's loop, so a blocking e-ink refresh there
+  // leaves a blind window. A contact first seen after a longer gap than this began
+  // unobserved: its first sample may be the tail of a swipe, not a touch-down.
+  // Above the loop's idle cadence (light-sleep timer wake ~150 ms).
+  static constexpr unsigned long TOUCH_BLIND_GAP_MS = 300;
   static constexpr unsigned long TOUCH_MULTI_SWIPE_MAX_MS = 2000;
   static constexpr int TOUCH_MULTI_CONTACT_SEPARATION_SLOP_PX = 45;
   static constexpr int64_t TOUCH_CONTACT_ASSIGNMENT_AMBIGUITY_PX_SQ = 64;

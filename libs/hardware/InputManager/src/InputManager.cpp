@@ -1282,6 +1282,9 @@ uint8_t InputManager::serviceTouch() {
     resetMultiTouchGesture();
   }
 
+  const bool afterBlindGap = lastTouchServiceAt != 0 && now - lastTouchServiceAt > TOUCH_BLIND_GAP_MS;
+  lastTouchServiceAt = now;
+
   if (t.controller == BoardConfig::TouchController::Gt911) {
     pollGt911(now);
   } else if (t.controller == BoardConfig::TouchController::Ft5x06) {
@@ -1294,6 +1297,15 @@ uint8_t InputManager::serviceTouch() {
     updateTouchFromIrq(now, 0);  // detection polls I2C; the IRQ is unused now
     // Synthesized confirm tracks an actually-detected press, not the IRQ line.
     if (touchPressedEvent) touchIrqPulseUntil = now + TOUCH_IRQ_PULSE_MS;
+  }
+
+  // A contact first seen right after a blind window (the loop was blocked, e.g.
+  // by a synchronous refresh) was not watched from its touch-down: the finger
+  // may have been mid-swipe, and the short tail left would read as a tap on
+  // whatever row it ended over. Never a tap or long-press; a swipe still counts.
+  if (touchPressedEvent && afterBlindGap) {
+    touchMovedBeyondTapSlop = true;
+    touchMovedBeyondTapReleaseSlop = true;
   }
 
   // Long-press classification, beside the tap/swipe machinery it shares state
